@@ -10,11 +10,13 @@
 # curl -L https://install.pivpn.io | bash
 # Make sure you have `curl` installed
 
-
+set -e
 ######## VARIABLES #########
 
 tmpLog="/tmp/pivpn-install.log"
 instalLogLoc="/etc/pivpn/install.log"
+setupVars=/etc/pivpn/setupVars.conf
+useUpdateVars=false
 
 ### PKG Vars ###
 PKG_MANAGER="apt-get"
@@ -22,7 +24,7 @@ PKG_CACHE="/var/lib/apt/lists/"
 UPDATE_PKG_CACHE="${PKG_MANAGER} update"
 PKG_INSTALL="${PKG_MANAGER} --yes --no-install-recommends install"
 PKG_COUNT="${PKG_MANAGER} -s -o Debug::NoLocking=true upgrade | grep -c ^Inst || true"
-PIVPN_DEPS=( openvpn git dhcpcd5 tar wget grep iptables-persistent dnsutils expect whiptail )
+PIVPN_DEPS=( openvpn git dhcpcd5 tar wget grep iptables-persistent dnsutils expect whiptail net-tools)
 ###          ###
 
 pivpnGitUrl="https://github.com/pivpn/pivpn.git"
@@ -42,6 +44,11 @@ c=$(( columns / 2 ))
 r=$(( r < 20 ? 20 : r ))
 c=$(( c < 70 ? 70 : c ))
 
+######## Undocumented Flags. Shhh ########
+skipSpaceCheck=false
+reconfigure=false
+runUnattended=false
+
 # Find IP used to route to outside world
 
 IPv4dev=$(ip route get 8.8.8.8 | awk '{for(i=1;i<=NF;i++)if($i~/dev/)print $(i+1)}')
@@ -51,72 +58,60 @@ IPv4gw=$(ip route get 8.8.8.8 | awk '{print $3}')
 availableInterfaces=$(ip -o link | grep "state UP" | awk '{print $2}' | cut -d':' -f1 | cut -d'@' -f1)
 dhcpcdFile=/etc/dhcpcd.conf
 
-######## FIRST CHECK ########
-# Must be root to install
-echo ":::"
-if [[ $EUID -eq 0 ]];then
-    echo "::: You are root."
-else
-    echo "::: sudo will be used for the install."
-    # Check if it is actually installed
-    # If it isn't, exit because the install cannot complete
-    if [[ $(dpkg-query -s sudo) ]];then
-        export SUDO="sudo"
-        export SUDOE="sudo -E"
-    else
-        echo "::: Please install sudo or run this as root."
-        exit 1
-    fi
-fi
-
 # Next see if we are on a tested and supported OS
 function noOS_Support() {
     whiptail --msgbox --backtitle "INVALID OS DETECTED" --title "Invalid OS" "We have not been able to detect a supported OS.
-Currently this installer supports Raspbian jessie, Ubuntu 14.04 (trusty), and Ubuntu 16.04 (xenial).
+Currently this installer supports Raspbian and Debian (Jessie and Stretch), Devuan (Jessie) and Ubuntu from 14.04 (trusty) to 17.04 (zesty).
 If you think you received this message in error, you can post an issue on the GitHub at https://github.com/pivpn/pivpn/issues." ${r} ${c}
     exit 1
 }
 
 function maybeOS_Support() {
     if (whiptail --backtitle "Not Supported OS" --title "Not Supported OS" --yesno "You are on an OS that we have not tested but MAY work.
-                Currently this installer supports Raspbian jessie, Ubuntu 14.04 (trusty), and Ubuntu 16.04 (xenial).
-                Would you like to continue anyway?" ${r} ${c}) then
-                echo "::: Did not detect perfectly supported OS but,"
-                echo "::: Continuing installation at user's own risk..."
-            else
-                echo "::: Exiting due to unsupported OS"
-                exit 1
-            fi
+Currently this installer supports Raspbian and Debian (Jessie and Stretch), Devuan (Jessie) and Ubuntu from 14.04 (trusty) to 17.04 (zesty).
+Would you like to continue anyway?" ${r} ${c}) then
+        echo "::: Did not detect perfectly supported OS but,"
+        echo "::: Continuing installation at user's own risk..."
+    else
+        echo "::: Exiting due to unsupported OS"
+        exit 1
+    fi
 }
 
-# if lsb_release command is on their system
-if hash lsb_release 2>/dev/null; then
+# Compatibility
+distro_check() {
+  # if lsb_release command is on their system
+  if hash lsb_release 2>/dev/null; then
+
     PLAT=$(lsb_release -si)
     OSCN=$(lsb_release -sc) # We want this to be trusty xenial or jessie
 
-    if [[ $PLAT == "Ubuntu" || $PLAT == "Raspbian" || $PLAT == "Debian" ]]; then
-        if [[ $OSCN != "trusty" && $OSCN != "xenial" && $OSCN != "jessie" ]]; then
-            maybeOS_Support
-        fi
-    else
-        noOS_Support
-    fi
-# else get info from os-release
-elif grep -q debian /etc/os-release; then
-    if grep -q jessie /etc/os-release; then
-        PLAT="Raspbian"
-        OSCN="jessie"
-    else
-        PLAT="Ubuntu"
-        OSCN="unknown"
-        maybeOS_Support
-    fi
-# else we prob don't want to install
-else
-    noOS_Support
-fi
+  else # else get info from os-release
 
-echo "${PLAT}" > /tmp/DET_PLATFORM
+    PLAT=$(grep "^NAME" /etc/os-release | awk -F "=" '{print $2}' | tr -d '"' | awk '{print $1}')
+    VER=$(grep "VERSION_ID" /etc/os-release | awk -F "=" '{print $2}' | tr -d '"')
+    declare -A VER_MAP=(["9"]="stretch" ["8"]="jessie" ["16.04"]="xenial" ["14.04"]="trusty")
+    OSCN=${VER_MAP["${VER}"]}
+
+  fi
+
+  case ${PLAT} in
+    Ubuntu|Raspbian|Debian|Devuan)
+      case ${OSCN} in
+        trusty|xenial|jessie|stretch)
+          ;;
+        *)
+          maybeOS_Support
+          ;;
+      esac
+      ;;
+    *)
+      noOS_Support
+      ;;
+  esac
+
+  echo "${PLAT}" > /tmp/DET_PLATFORM
+}
 
 ####### FUNCTIONS ##########
 spinner()
@@ -181,7 +176,7 @@ chooseUser() {
         fi
         userArray+=("${line}" "" "${mode}")
     done <<< "${availableUsers}"
-    chooseUserCmd=(whiptail --title "Choose A User" --separate-output --radiolist "Choose:" ${r} ${c} ${numUsers})
+    chooseUserCmd=(whiptail --title "Choose A User" --separate-output --radiolist "Choose (press space to select):" ${r} ${c} ${numUsers})
     chooseUserOptions=$("${chooseUserCmd[@]}" "${userArray[@]}" 2>&1 >/dev/tty)
     if [[ $? = 0 ]]; then
         for desiredUser in ${chooseUserOptions}; do
@@ -240,7 +235,7 @@ chooseInterface() {
     # Temporary Whiptail options storage
     local chooseInterfaceOptions
     # Loop sentinel variable
-    local firstLoop=1
+    local firstloop=1
 
     if [[ $(echo "${availableInterfaces}" | wc -l) -eq 1 ]]; then
       pivpnInterface="${availableInterfaces}"
@@ -259,7 +254,7 @@ chooseInterface() {
 
     # Find out how many interfaces are available to choose from
     interfaceCount=$(echo "${availableInterfaces}" | wc -l)
-    chooseInterfaceCmd=(whiptail --separate-output --radiolist "Choose An Interface (press space to select)" ${r} ${c} ${interfaceCount})
+    chooseInterfaceCmd=(whiptail --separate-output --radiolist "Choose An Interface (press space to select):" ${r} ${c} ${interfaceCount})
     chooseInterfaceOptions=$("${chooseInterfaceCmd[@]}" "${interfacesArray[@]}" 2>&1 >/dev/tty)
     if [[ $? = 0 ]]; then
         for desiredInterface in ${chooseInterfaceOptions}; do
@@ -280,6 +275,7 @@ If you are in Amazon then you can not configure a static IP anyway. Just ensure 
 }
 
 getStaticIPv4Settings() {
+    local ipSettingsCorrect
     # Grab their current DNS Server
     IPv4dns=$(nslookup 127.0.0.1 | grep Server: | awk '{print $2}')
     # Ask if the user wants to use DHCP settings as their static IP
@@ -347,7 +343,6 @@ setStaticIPv4() {
     if [[ -f /etc/dhcpcd.conf ]]; then
         if grep -q "${IPv4addr}" ${dhcpcdFile}; then
             echo "::: Static IP already configured."
-            :
         else
             setDHCPCD
             $SUDO ip addr replace dev "${pivpnInterface}" "${IPv4addr}"
@@ -359,15 +354,6 @@ setStaticIPv4() {
         echo "::: Critical: Unable to locate configuration file to set static IPv4 address!"
         exit 1
     fi
-}
-
-setNetwork() {
-    # Sets the Network IP and Mask correctly
-    LOCALMASK=$(ifconfig "${pivpnInterface}" | awk '/Mask:/{ print $4;} ' | cut -c6-)
-    LOCALIP=$(ifconfig "${pivpnInterface}" | grep -Eo 'inet (addr:)?([0-9]*\.){3}[0-9]*' | grep -Eo '([0-9]*\.){3}[0-9]*')
-    IFS=. read -r i1 i2 i3 i4 <<< "$LOCALIP"
-    IFS=. read -r m1 m2 m3 m4 <<< "$LOCALMASK"
-    LOCALNET=$(printf "%d.%d.%d.%d\n" "$((i1 & m1))" "$((i2 & m2))" "$((i3 & m3))" "$((i4 & m4))")
 }
 
 function valid_ip()
@@ -418,6 +404,23 @@ package_check_install() {
     dpkg-query -W -f='${Status}' "${1}" 2>/dev/null | grep -c "ok installed" || ${PKG_INSTALL} "${1}"
 }
 
+addSoftwareRepo() {
+  # Add the official OpenVPN repo for distros that don't have the latest version in their default repos
+  case ${PLAT} in
+    Ubuntu|Debian|Devuan)
+      case ${OSCN} in
+        trusty|xenial|wheezy|jessie)
+          wget -qO- https://swupdate.openvpn.net/repos/repo-public.gpg | $SUDO apt-key add -
+          echo "deb http://build.openvpn.net/debian/openvpn/stable $OSCN main" | $SUDO tee /etc/apt/sources.list.d/swupdate.openvpn.net.list > /dev/null
+          echo -n "::: Adding OpenVPN repo for $PLAT $OSCN ..."
+          $SUDO apt-get -qq update & spinner $!
+          echo " done!"
+          ;;
+      esac
+      ;;
+  esac
+}
+
 update_package_cache() {
   #Running apt-get update/upgrade with minimal output can cause some issues with
   #requiring user input
@@ -428,15 +431,6 @@ update_package_cache() {
   timestampAsDate=$(date -d @"${timestamp}" "+%b %e")
   today=$(date "+%b %e")
 
-  if [[ ${PLAT} == "Ubuntu" || ${PLAT} == "Debian" ]]; then
-    if [[ ${OSCN} == "trusty" || ${OSCN} == "jessie" || ${OSCN} == "wheezy" ]]; then
-      wget -O - https://swupdate.openvpn.net/repos/repo-public.gpg| $SUDO apt-key add -
-      echo "deb http://swupdate.openvpn.net/apt $OSCN main" | $SUDO tee /etc/apt/sources.list.d/swupdate.openvpn.net.list > /dev/null
-      echo -n "::: Adding OpenVPN repo for $PLAT $OSCN ..."
-      $SUDO apt-get -qq update & spinner $!
-      echo " done!"
-    fi
-  fi
 
   if [ ! "${today}" == "${timestampAsDate}" ]; then
     #update package lists
@@ -488,7 +482,6 @@ unattendedUpgrades() {
 
     if (whiptail --backtitle "Security Updates" --title "Unattended Upgrades" --yesno "Do you want to enable unattended upgrades of security patches to this server?" ${r} ${c}) then
         UNATTUPG="unattended-upgrades"
-        $SUDO apt-get --yes --quiet --no-install-recommends install "$UNATTUPG" > /dev/null & spinner $!
     else
         UNATTUPG=""
     fi
@@ -498,78 +491,15 @@ stopServices() {
     # Stop openvpn
     $SUDO echo ":::"
     $SUDO echo -n "::: Stopping OpenVPN service..."
-    if [[ $PLAT == "Ubuntu" || $PLAT == "Debian" ]]; then
-        $SUDO service openvpn stop || true
-    else
-        $SUDO systemctl stop openvpn.service || true
-    fi
+    case ${PLAT} in
+        Ubuntu|Debian|*vuan)
+            $SUDO service openvpn stop || true
+            ;;
+        *)
+            $SUDO systemctl stop openvpn.service || true
+            ;;
+    esac
     $SUDO echo " done."
-}
-
-checkForDependencies() {
-    #Running apt-get update/upgrade with minimal output can cause some issues with
-    #requiring user input (e.g password for phpmyadmin see #218)
-    #We'll change the logic up here, to check to see if there are any updates available and
-    # if so, advise the user to run apt-get update/upgrade at their own discretion
-    #Check to see if apt-get update has already been run today
-    # it needs to have been run at least once on new installs!
-
-    timestamp=$(stat -c %Y /var/cache/apt/)
-    timestampAsDate=$(date -d @"$timestamp" "+%b %e")
-    today=$(date "+%b %e")
-
-    if [[ $PLAT == "Ubuntu" || $PLAT == "Debian" ]]; then
-        if [[ $OSCN == "trusty" || $OSCN == "jessie" || $OSCN == "wheezy" ]]; then
-            wget -O - https://swupdate.openvpn.net/repos/repo-public.gpg| $SUDO apt-key add -
-            echo "deb http://swupdate.openvpn.net/apt $OSCN main" | $SUDO tee /etc/apt/sources.list.d/swupdate.openvpn.net.list > /dev/null
-            echo -n "::: Adding OpenVPN repo for $PLAT $OSCN ..."
-            $SUDO apt-get -qq update & spinner $!
-            echo " done!"
-        fi
-    fi
-
-    if [ ! "$today" == "$timestampAsDate" ]; then
-        #update package lists
-        echo ":::"
-        echo -n "::: apt-get update has not been run today. Running now..."
-        $SUDO apt-get -qq update & spinner $!
-        echo " done!"
-    fi
-    echo ":::"
-    echo -n "::: Checking apt-get for upgraded packages...."
-    updatesToInstall=$($SUDO apt-get -s -o Debug::NoLocking=true upgrade | grep -c ^Inst)
-    echo " done!"
-    echo ":::"
-    if [[ $updatesToInstall -eq "0" ]]; then
-        echo "::: Your pi is up to date! Continuing with PiVPN installation..."
-    else
-        echo "::: There are $updatesToInstall updates availible for your pi!"
-        echo "::: We recommend you run 'sudo apt-get upgrade' after installing PiVPN! "
-        echo ":::"
-    fi
-    echo ":::"
-    echo "::: Checking dependencies:"
-
-    dependencies=( openvpn git dhcpcd5 tar wget grep iptables-persistent dnsutils expect whiptail )
-    for i in "${dependencies[@]}"; do
-        echo -n ":::    Checking for $i..."
-        if [ "$(dpkg-query -W -f='${Status}' "$i" 2>/dev/null | grep -c "ok installed")" -eq 0 ]; then
-            echo -n " Not found! Installing...."
-            #Supply answers to the questions so we don't prompt user
-            if [[ $i = "iptables-persistent" ]]; then
-                echo iptables-persistent iptables-persistent/autosave_v4 boolean true | $SUDO debconf-set-selections
-                echo iptables-persistent iptables-persistent/autosave_v6 boolean false | $SUDO debconf-set-selections
-            fi
-            if [[ $i == "expect" ]] || [[ $i == "openvpn" ]]; then
-                ($SUDO apt-get --yes --quiet --no-install-recommends install "$i" > /dev/null || echo "Installation Failed!" && fixApt) & spinner $!
-            else
-                ($SUDO apt-get --yes --quiet install "$i" > /dev/null || echo "Installation Failed!" && fixApt) & spinner $!
-            fi
-            echo " done!"
-        else
-            echo " already installed!"
-        fi
-    done
 }
 
 getGitFiles() {
@@ -604,23 +534,27 @@ make_repo() {
 }
 
 update_repo() {
-    # Pull the latest commits
-    echo -n ":::     Updating repo in $1..."
-    cd "${1}" || exit 1
-    $SUDO git stash -q > /dev/null & spinner $!
-    $SUDO git pull -q > /dev/null & spinner $!
-    if [ -z "${TESTING+x}" ]; then
-        :
+    if [[ "${reconfigure}" == true ]]; then
+          echo "::: --reconfigure passed to install script. Not downloading/updating local repos"
     else
-        ${SUDOE} git checkout test
+        # Pull the latest commits
+        echo -n ":::     Updating repo in $1..."
+        cd "${1}" || exit 1
+        $SUDO git stash -q > /dev/null & spinner $!
+        $SUDO git pull -q > /dev/null & spinner $!
+        if [ -z "${TESTING+x}" ]; then
+            :
+        else
+            ${SUDOE} git checkout test
+        fi
+        echo " done!"
     fi
-    echo " done!"
 }
 
 setCustomProto() {
   # Set the available protocols into an array so it can be used with a whiptail dialog
   if protocol=$(whiptail --title "Protocol" --radiolist \
-  "Choose a protocol. Please only choose TCP if you know why you need TCP." ${r} ${c} 2 \
+  "Choose a protocol (press space to select). Please only choose TCP if you know why you need TCP." ${r} ${c} 2 \
   "UDP" "" ON \
   "TCP" "" OFF 3>&1 1>&2 2>&3)
   then
@@ -679,58 +613,38 @@ setCustomPort() {
 }
 
 setClientDNS() {
-    DNSChoseCmd=(whiptail --separate-output --radiolist "Select the DNS Provider for your VPN Clients. To use your own, select Custom." ${r} ${c} 6)
+    DNSChoseCmd=(whiptail --separate-output --radiolist "Select the DNS Provider for your VPN Clients (press space to select). To use your own, select Custom." ${r} ${c} 6)
     DNSChooseOptions=(Google "" on
             OpenDNS "" off
             Level3 "" off
             DNS.WATCH "" off
             Norton "" off
+            FamilyShield "" off
+            CloudFlare "" off
             Custom "" off)
 
     if DNSchoices=$("${DNSChoseCmd[@]}" "${DNSChooseOptions[@]}" 2>&1 >/dev/tty)
     then
-        case ${DNSchoices} in
-        Google)
-            echo "::: Using Google DNS servers."
-            OVPNDNS1="8.8.8.8"
-            OVPNDNS2="8.8.4.4"
-            # These are already in the file
-            ;;
-        OpenDNS)
-            echo "::: Using OpenDNS servers."
-            OVPNDNS1="208.67.222.222"
-            OVPNDNS2="208.67.220.220"
-            $SUDO sed -i '0,/\(dhcp-option DNS \)/ s/\(dhcp-option DNS \).*/\1'${OVPNDNS1}'\"/' /etc/openvpn/server.conf
-            $SUDO sed -i '0,/\(dhcp-option DNS \)/! s/\(dhcp-option DNS \).*/\1'${OVPNDNS2}'\"/' /etc/openvpn/server.conf
-            ;;
-        Level3)
-            echo "::: Using Level3 servers."
-            OVPNDNS1="209.244.0.3"
-            OVPNDNS2="209.244.0.4"
-            $SUDO sed -i '0,/\(dhcp-option DNS \)/ s/\(dhcp-option DNS \).*/\1'${OVPNDNS1}'\"/' /etc/openvpn/server.conf
-            $SUDO sed -i '0,/\(dhcp-option DNS \)/! s/\(dhcp-option DNS \).*/\1'${OVPNDNS2}'\"/' /etc/openvpn/server.conf
-            ;;
-        DNS.WATCH)
-            echo "::: Using DNS.WATCH servers."
-            OVPNDNS1="84.200.69.80"
-            OVPNDNS2="84.200.70.40"
-            $SUDO sed -i '0,/\(dhcp-option DNS \)/ s/\(dhcp-option DNS \).*/\1'${OVPNDNS1}'\"/' /etc/openvpn/server.conf
-            $SUDO sed -i '0,/\(dhcp-option DNS \)/! s/\(dhcp-option DNS \).*/\1'${OVPNDNS2}'\"/' /etc/openvpn/server.conf
-            ;;
-        Norton)
-            echo "::: Using Norton ConnectSafe servers."
-            OVPNDNS1="199.85.126.10"
-            OVPNDNS2="199.85.127.10"
-            $SUDO sed -i '0,/\(dhcp-option DNS \)/ s/\(dhcp-option DNS \).*/\1'${OVPNDNS1}'\"/' /etc/openvpn/server.conf
-            $SUDO sed -i '0,/\(dhcp-option DNS \)/! s/\(dhcp-option DNS \).*/\1'${OVPNDNS2}'\"/' /etc/openvpn/server.conf
-            ;;
-        Custom)
-            until [[ $DNSSettingsCorrect = True ]]
-            do
-                strInvalid="Invalid"
 
-                if OVPNDNS=$(whiptail --backtitle "Specify Upstream DNS Provider(s)"  --inputbox "Enter your desired upstream DNS provider(s), seperated by a comma.\n\nFor example '8.8.8.8, 8.8.4.4'" ${r} ${c} "" 3>&1 1>&2 2>&3)
-                then
+      if [[ ${DNSchoices} != "Custom" ]]; then
+
+        echo "::: Using ${DNSchoices} servers."
+        declare -A DNS_MAP=(["Google"]="8.8.8.8 8.8.4.4" ["OpenDNS"]="208.67.222.222 208.67.220.220" ["Level3"]="209.244.0.3 209.244.0.4" ["DNS.WATCH"]="84.200.69.80 84.200.70.40" ["Norton"]="199.85.126.10 199.85.127.10" ["FamilyShield"]="208.67.222.123 208.67.220.123" ["CloudFlare"]="1.1.1.1 1.0.0.1")
+
+        OVPNDNS1=$(awk '{print $1}' <<< "${DNS_MAP["${DNSchoices}"]}")
+        OVPNDNS2=$(awk '{print $2}' <<< "${DNS_MAP["${DNSchoices}"]}")
+
+        $SUDO sed -i '0,/\(dhcp-option DNS \)/ s/\(dhcp-option DNS \).*/\1'${OVPNDNS1}'\"/' /etc/openvpn/server.conf
+        $SUDO sed -i '0,/\(dhcp-option DNS \)/! s/\(dhcp-option DNS \).*/\1'${OVPNDNS2}'\"/' /etc/openvpn/server.conf
+
+      else
+
+          until [[ $DNSSettingsCorrect = True ]]
+          do
+              strInvalid="Invalid"
+
+              if OVPNDNS=$(whiptail --backtitle "Specify Upstream DNS Provider(s)"  --inputbox "Enter your desired upstream DNS provider(s), seperated by a comma.\n\nFor example '8.8.8.8, 8.8.4.4'" ${r} ${c} "" 3>&1 1>&2 2>&3)
+              then
                     OVPNDNS1=$(echo "$OVPNDNS" | sed 's/[, \t]\+/,/g' | awk -F, '{print$1}')
                     OVPNDNS2=$(echo "$OVPNDNS" | sed 's/[, \t]\+/,/g' | awk -F, '{print$2}')
                     if ! valid_ip "$OVPNDNS1" || [ ! "$OVPNDNS1" ]; then
@@ -739,11 +653,11 @@ setClientDNS() {
                     if ! valid_ip "$OVPNDNS2" && [ "$OVPNDNS2" ]; then
                         OVPNDNS2=$strInvalid
                     fi
-                else
+              else
                     echo "::: Cancel selected, exiting...."
                     exit 1
                 fi
-                if [[ $OVPNDNS1 == "$strInvalid" ]] || [[ $OVPNDNS2 == "$strInvalid" ]]; then
+              if [[ $OVPNDNS1 == "$strInvalid" ]] || [[ $OVPNDNS2 == "$strInvalid" ]]; then
                     whiptail --msgbox --backtitle "Invalid IP" --title "Invalid IP" "One or both entered IP addresses were invalid. Please try again.\n\n    DNS Server 1:   $OVPNDNS1\n    DNS Server 2:   $OVPNDNS2" ${r} ${c}
                     if [[ $OVPNDNS1 == "$strInvalid" ]]; then
                         OVPNDNS1=""
@@ -752,7 +666,7 @@ setClientDNS() {
                         OVPNDNS2=""
                     fi
                     DNSSettingsCorrect=False
-                else
+              else
                     if (whiptail --backtitle "Specify Upstream DNS Provider(s)" --title "Upstream DNS Provider(s)" --yesno "Are these settings correct?\n    DNS Server 1:   $OVPNDNS1\n    DNS Server 2:   $OVPNDNS2" ${r} ${c}) then
                         DNSSettingsCorrect=True
                         $SUDO sed -i '0,/\(dhcp-option DNS \)/ s/\(dhcp-option DNS \).*/\1'${OVPNDNS1}'\"/' /etc/openvpn/server.conf
@@ -766,30 +680,33 @@ setClientDNS() {
                         DNSSettingsCorrect=False
                     fi
                 fi
-        done
-        ;;
-    esac
+          done
+      fi
+
     else
-        echo "::: Cancel selected. Exiting..."
-        exit 1
+      echo "::: Cancel selected. Exiting..."
+      exit 1
     fi
 }
 
 confOpenVPN() {
-    # Ask user if want to modify default port
-    SERVER_NAME="server"
+    # Generate a random, alphanumeric identifier of 16 characters for this server so that we can use verify-x509-name later that is unique for this server installation. Source: Earthgecko (https://gist.github.com/earthgecko/3089509)
+    NEW_UUID=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 16 | head -n 1)
+    SERVER_NAME="server_${NEW_UUID}"
 
-    # Ask user for desired level of encryption
-    ENCRYPT=$(whiptail --backtitle "Setup OpenVPN" --title "Encryption Strength" --radiolist \
-    "Choose your desired level of encryption:\n   This is an encryption key that will be generated on your system.  The larger the key, the more time this will take.  For most applications it is recommended to use 2048 bit.  If you are testing or just want to get through it quicker you can use 1024.  If you are paranoid about ... things... then grab a cup of joe and pick 4096." ${r} ${c} 3 \
-    "2048" "Use 2048-bit encryption. Recommended level." ON \
-    "1024" "Use 1024-bit encryption. Test level." OFF \
-    "4096" "Use 4096-bit encryption. Paranoid level." OFF 3>&1 1>&2 2>&3)
+    if [[ ${useUpdateVars} == false ]]; then
+        # Ask user for desired level of encryption
+        ENCRYPT=$(whiptail --backtitle "Setup OpenVPN" --title "Encryption strength" --radiolist \
+        "Choose your desired level of encryption (press space to select):\n   This is an encryption key that will be generated on your system.  The larger the key, the more time this will take.  For most applications, it is recommended to use 2048 bits.  If you are testing, you can use 1024 bits to speed things up, but do not use this for normal use!  If you are paranoid about ... things... then grab a cup of joe and pick 4096 bits." ${r} ${c} 3 \
+        "1024" "Use 1024-bit encryption (testing only)" OFF \
+        "2048" "Use 2048-bit encryption (recommended level)" ON \
+        "4096" "Use 4096-bit encryption (paranoid level)" OFF 3>&1 1>&2 2>&3)
 
-    exitstatus=$?
-    if [ $exitstatus != 0 ]; then
-        echo "::: Cancel selected. Exiting..."
-        exit 1
+        exitstatus=$?
+        if [ $exitstatus != 0 ]; then
+            echo "::: Cancel selected. Exiting..."
+            exit 1
+        fi
     fi
 
     # If easy-rsa exists, remove it
@@ -804,6 +721,7 @@ confOpenVPN() {
     $SUDO mkdir /etc/openvpn/easy-rsa/pki
 
     # Write out new vars file
+    set +e
     IFS= read -d '' String <<"EOF"
 if [ -z "$EASYRSA_CALLER" ]; then
     echo "Nope." >&2
@@ -816,7 +734,8 @@ set_var EASYRSA_ALGO       rsa
 set_var EASYRSA_CURVE      secp384r1
 EOF
 
-echo "${String}" | $SUDO tee /etc/openvpn/easy-rsa/vars >/dev/null
+    echo "${String}" | $SUDO tee /etc/openvpn/easy-rsa/vars >/dev/null
+    set -e
 
     # Edit the KEY_SIZE variable in the vars file to set user chosen key size
     cd /etc/openvpn/easy-rsa || exit
@@ -830,33 +749,76 @@ echo "${String}" | $SUDO tee /etc/openvpn/easy-rsa/vars >/dev/null
     ${SUDOE} ./easyrsa --batch build-ca nopass
     printf "\n::: CA Complete.\n"
 
-    whiptail --msgbox --backtitle "Setup OpenVPN" --title "Server Information" "The server key, Diffie-Hellman key, and HMAC key will now be generated." ${r} ${c}
+    if [[ ${useUpdateVars} == false ]]; then
+        whiptail --msgbox --backtitle "Setup OpenVPN" --title "Server Information" "The server key, Diffie-Hellman key, and HMAC key will now be generated." ${r} ${c}
+    fi
 
     # Build the server
-    ${SUDOE} ./easyrsa build-server-full server nopass
+    ${SUDOE} ./easyrsa build-server-full ${SERVER_NAME} nopass
 
-    if ([ "$ENCRYPT" -ge "4096" ] && whiptail --backtitle "Setup OpenVPN" --title "Download Diffie-Hellman Parameters" --yesno --defaultno "Download Diffie-Hellman parameters from a public DH parameter generation service?\n\nGenerating DH parameters for a $ENCRYPT-bit key can take many hours on a Raspberry Pi. You can instead download DH parameters from \"2 Ton Digital\" that are generated at regular intervals as part of a public service. Downloaded DH parameters will be randomly selected from a pool of the last 128 generated.\nMore information about this service can be found here: https://2ton.com.au/dhtool/\n\nIf you're paranoid, choose 'No' and Diffie-Hellman parameters will be generated on your device." ${r} ${c})
-then
-    # Downloading parameters
-    RANDOM_INDEX=$(( RANDOM % 128 ))
-    ${SUDOE} curl "https://2ton.com.au/dhparam/${ENCRYPT}/${RANDOM_INDEX}" -o "/etc/openvpn/easy-rsa/pki/dh${ENCRYPT}.pem"
-else
-    # Generate Diffie-Hellman key exchange
-    ${SUDOE} ./easyrsa gen-dh
-    ${SUDOE} mv pki/dh.pem pki/dh${ENCRYPT}.pem
-fi
+    if [[ ${useUpdateVars} == false ]]; then
+
+      if [[ ${PLAT} == "Raspbian" ]] && [[ ${OSCN} != "stretch" ]]; then
+        APPLY_TWO_POINT_FOUR=false
+      else
+        if (whiptail --backtitle "Setup OpenVPN" --title "Version 2.4 improvements" --yesno --defaultno "OpenVPN 2.4 brings support for stronger key exchange using Elliptic Curves and encrypted control channel, along with faster LZ4 compression.\n\nIf your clients do run OpenVPN 2.4 or later you can enable these features, otherwise choose 'No' for best compatibility.\n\nNOTE: Current mobile app, that is OpenVPN connect, is supported." ${r} ${c}); then
+          APPLY_TWO_POINT_FOUR=true
+          $SUDO touch /etc/pivpn/TWO_POINT_FOUR
+        else
+          APPLY_TWO_POINT_FOUR=false
+        fi
+      fi
+    fi
+
+    if [[ ${runUnattended} == true ]] && [[ ${APPLY_TWO_POINT_FOUR} == true ]]; then
+      $SUDO touch /etc/pivpn/TWO_POINT_FOUR
+    fi
+
+    if [[ ${useUpdateVars} == false ]]; then
+      if [[ ${APPLY_TWO_POINT_FOUR} == false ]]; then
+        if ([ "$ENCRYPT" -ge "4096" ] && whiptail --backtitle "Setup OpenVPN" --title "Download Diffie-Hellman Parameters" --yesno --defaultno "Download Diffie-Hellman parameters from a public DH parameter generation service?\n\nGenerating DH parameters for a $ENCRYPT-bit key can take many hours on a Raspberry Pi. You can instead download DH parameters from \"2 Ton Digital\" that are generated at regular intervals as part of a public service. Downloaded DH parameters will be randomly selected from their database.\nMore information about this service can be found here: https://2ton.com.au/safeprimes/\n\nIf you're paranoid, choose 'No' and Diffie-Hellman parameters will be generated on your device." ${r} ${c}); then
+          DOWNLOAD_DH_PARAM=true
+        else
+          DOWNLOAD_DH_PARAM=false
+        fi
+      fi
+    fi
+
+    if [[ ${APPLY_TWO_POINT_FOUR} == false ]]; then
+      if [ "$ENCRYPT" -ge "4096" ] && [[ ${DOWNLOAD_DH_PARAM} == true ]]; then
+        # Downloading parameters
+        ${SUDOE} curl "https://2ton.com.au/getprimes/random/dhparam/${ENCRYPT}" -o "/etc/openvpn/easy-rsa/pki/dh${ENCRYPT}.pem"
+      else
+        # Generate Diffie-Hellman key exchange
+        ${SUDOE} ./easyrsa gen-dh
+        ${SUDOE} mv pki/dh.pem pki/dh${ENCRYPT}.pem
+      fi
+    fi
 
     # Generate static HMAC key to defend against DDoS
     ${SUDOE} openvpn --genkey --secret pki/ta.key
 
+    # Generate an empty Certificate Revocation List
+    ${SUDOE} ./easyrsa gen-crl
+    ${SUDOE} cp pki/crl.pem /etc/openvpn/crl.pem
+    ${SUDOE} chown nobody:nogroup /etc/openvpn/crl.pem
+
     # Write config file for server using the template .txt file
     $SUDO cp /etc/.pivpn/server_config.txt /etc/openvpn/server.conf
 
-    $SUDO sed -i "s/LOCALNET/${LOCALNET}/g" /etc/openvpn/server.conf
-    $SUDO sed -i "s/LOCALMASK/${LOCALMASK}/g" /etc/openvpn/server.conf
+    if [[ ${APPLY_TWO_POINT_FOUR} == true ]]; then
+      #If they enabled 2.4 change compression algorithm and use tls-crypt instead of tls-auth to encrypt control channel
+      $SUDO sed -i "s/comp-lzo/compress lz4/" /etc/openvpn/server.conf
+      $SUDO sed -i "s/tls-auth \/etc\/openvpn\/easy-rsa\/pki\/ta.key 0/tls-crypt \/etc\/openvpn\/easy-rsa\/pki\/ta.key/" /etc/openvpn/server.conf
+    fi
 
-    # Set the user encryption key size
-    $SUDO sed -i "s/\(dh \/etc\/openvpn\/easy-rsa\/pki\/dh\).*/\1${ENCRYPT}.pem/" /etc/openvpn/server.conf
+    if [[ ${APPLY_TWO_POINT_FOUR} == true ]]; then
+      #If they enabled 2.4 disable dh parameters, use a specific curve instead
+      $SUDO sed -i "s/\(dh \/etc\/openvpn\/easy-rsa\/pki\/dh\).*/dh none\necdh-curve secp384r1/" /etc/openvpn/server.conf
+    else
+      # Otherwise set the user encryption key size
+      $SUDO sed -i "s/\(dh \/etc\/openvpn\/easy-rsa\/pki\/dh\).*/\1${ENCRYPT}.pem/" /etc/openvpn/server.conf
+    fi
 
     # if they modified port put value in server.conf
     if [ $PORT != 1194 ]; then
@@ -875,6 +837,7 @@ fi
 
 confUnattendedUpgrades() {
     if [[ $UNATTUPG == "unattended-upgrades" ]]; then
+        $SUDO apt-get --yes --quiet --no-install-recommends install "$UNATTUPG" > /dev/null & spinner $!
         if [[ $PLAT == "Ubuntu" ]]; then
             # Ubuntu 50unattended-upgrades should already just have security enabled
             # so we just need to configure the 10periodic file
@@ -906,7 +869,7 @@ confNetwork() {
 
     # if ufw enabled, configure that
     if hash ufw 2>/dev/null; then
-        if $SUDO ufw status | grep -q inactive
+        if LANG=en_US.UTF-8 $SUDO ufw status | grep -q inactive
         then
             noUFW=1
         else
@@ -928,11 +891,14 @@ confNetwork() {
     if [[ $noUFW -eq 1 ]]; then
         echo 1 > /tmp/noUFW
         $SUDO iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$IPv4dev" -j MASQUERADE
-        if [[ $PLAT == "Ubuntu" || $PLAT == "Debian" ]]; then
-            $SUDO iptables-save | $SUDO tee /etc/iptables/rules.v4 > /dev/null
-        else
-            $SUDO netfilter-persistent save
-        fi
+        case ${PLAT} in
+            Ubuntu|Debian|Devuan)
+                $SUDO iptables-save | $SUDO tee /etc/iptables/rules.v4 > /dev/null
+                ;;
+            *)
+                $SUDO netfilter-persistent save
+                ;;
+        esac
     else
         echo 0 > /tmp/noUFW
     fi
@@ -953,41 +919,46 @@ confOVPN() {
     $SUDO cp /tmp/pivpnUSR /etc/pivpn/INSTALL_USER
     $SUDO cp /tmp/DET_PLATFORM /etc/pivpn/DET_PLATFORM
 
-    # Set status that no certs have been revoked
-    echo 0 > /tmp/REVOKE_STATUS
-    $SUDO cp /tmp/REVOKE_STATUS /etc/pivpn/REVOKE_STATUS
-
-    METH=$(whiptail --title "Public IP or DNS" --radiolist "Will clients use a Public IP or DNS Name to connect to your server?" ${r} ${c} 2 \
-    "$IPv4pub" "Use this public IP" "ON" \
-    "DNS Entry" "Use a public DNS" "OFF" 3>&1 1>&2 2>&3)
-
-    exitstatus=$?
-    if [ $exitstatus != 0 ]; then
-        echo "::: Cancel selected. Exiting..."
-        exit 1
-    fi
-
     $SUDO cp /etc/.pivpn/Default.txt /etc/openvpn/easy-rsa/pki/Default.txt
 
-    if [ "$METH" == "$IPv4pub" ]; then
-        $SUDO sed -i 's/IPv4pub/'"$IPv4pub"'/' /etc/openvpn/easy-rsa/pki/Default.txt
-    else
-        until [[ $publicDNSCorrect = True ]]
-        do
-            PUBLICDNS=$(whiptail --title "PiVPN Setup" --inputbox "What is the public DNS name of this Server?" ${r} ${c} 3>&1 1>&2 2>&3)
-            exitstatus=$?
-            if [ $exitstatus != 0 ]; then
+    if [[ ${APPLY_TWO_POINT_FOUR} == true ]]; then
+      #If they enabled 2.4 change compression algorithm and remove key-direction options since it's not required
+      $SUDO sed -i "s/comp-lzo/compress lz4/" /etc/openvpn/easy-rsa/pki/Default.txt
+      $SUDO sed -i "/key-direction 1/d" /etc/openvpn/easy-rsa/pki/Default.txt
+    fi
+
+    if [[ ${useUpdateVars} == false ]]; then
+        METH=$(whiptail --title "Public IP or DNS" --radiolist "Will clients use a Public IP or DNS Name to connect to your server (press space to select)?" ${r} ${c} 2 \
+        "$IPv4pub" "Use this public IP" "ON" \
+        "DNS Entry" "Use a public DNS" "OFF" 3>&1 1>&2 2>&3)
+
+        exitstatus=$?
+        if [ $exitstatus != 0 ]; then
             echo "::: Cancel selected. Exiting..."
             exit 1
-            fi
-            if (whiptail --backtitle "Confirm DNS Name" --title "Confirm DNS Name" --yesno "Is this correct?\n\n Public DNS Name:  $PUBLICDNS" ${r} ${c}) then
-                publicDNSCorrect=True
-                $SUDO sed -i 's/IPv4pub/'"$PUBLICDNS"'/' /etc/openvpn/easy-rsa/pki/Default.txt
-            else
-                publicDNSCorrect=False
+        fi
 
-            fi
-        done
+        if [ "$METH" == "$IPv4pub" ]; then
+            $SUDO sed -i 's/IPv4pub/'"$IPv4pub"'/' /etc/openvpn/easy-rsa/pki/Default.txt
+        else
+            until [[ $publicDNSCorrect = True ]]
+            do
+                PUBLICDNS=$(whiptail --title "PiVPN Setup" --inputbox "What is the public DNS name of this Server?" ${r} ${c} 3>&1 1>&2 2>&3)
+                exitstatus=$?
+                if [ $exitstatus != 0 ]; then
+                echo "::: Cancel selected. Exiting..."
+                exit 1
+                fi
+                if (whiptail --backtitle "Confirm DNS Name" --title "Confirm DNS Name" --yesno "Is this correct?\n\n Public DNS Name:  $PUBLICDNS" ${r} ${c}) then
+                    publicDNSCorrect=True
+                    $SUDO sed -i 's/IPv4pub/'"$PUBLICDNS"'/' /etc/openvpn/easy-rsa/pki/Default.txt
+                else
+                    publicDNSCorrect=False
+                fi
+            done
+        fi
+    else
+        $SUDO sed -i 's/IPv4pub/'"$PUBLICDNS"'/' /etc/openvpn/easy-rsa/pki/Default.txt
     fi
 
     # if they modified port put value in Default.txt for clients to use
@@ -1003,15 +974,90 @@ confOVPN() {
     # verify server name to strengthen security
     $SUDO sed -i "s/SRVRNAME/${SERVER_NAME}/" /etc/openvpn/easy-rsa/pki/Default.txt
 
-    $SUDO mkdir "/home/$pivpnUser/ovpns"
+    if [ ! -d "/home/$pivpnUser/ovpns" ]; then
+        $SUDO mkdir "/home/$pivpnUser/ovpns"
+    fi
     $SUDO chmod 0777 -R "/home/$pivpnUser/ovpns"
 }
 
+confLogging() {
+  echo "if \$programname == 'ovpn-server' then /var/log/openvpn.log
+if \$programname == 'ovpn-server' then ~" | $SUDO tee /etc/rsyslog.d/30-openvpn.conf > /dev/null
+
+  echo "/var/log/openvpn.log
+{
+	rotate 4
+	weekly
+	missingok
+	notifempty
+	compress
+	delaycompress
+	sharedscripts
+	postrotate
+		invoke-rc.d rsyslog rotate >/dev/null 2>&1 || true
+	endscript
+}" | $SUDO tee /etc/logrotate.d/openvpn > /dev/null
+
+  # Restart the logging service
+  case ${PLAT} in
+    Ubuntu|Debian|*vuan)
+      $SUDO service rsyslog restart || true
+      ;;
+    *)
+      $SUDO systemctl restart rsyslog.service || true
+      ;;
+  esac
+}
+
+finalExports() {
+    # Update variables in setupVars.conf file
+    if [ -e "${setupVars}" ]; then
+        $SUDO sed -i.update.bak '/pivpnUser/d;/UNATTUPG/d;/pivpnInterface/d;/IPv4dns/d;/IPv4addr/d;/IPv4gw/d;/pivpnProto/d;/PORT/d;/ENCRYPT/d;/DOWNLOAD_DH_PARAM/d;/PUBLICDNS/d;/OVPNDNS1/d;/OVPNDNS2/d;' "${setupVars}"
+    fi
+    {
+        echo "pivpnUser=${pivpnUser}"
+        echo "UNATTUPG=${UNATTUPG}"
+        echo "pivpnInterface=${pivpnInterface}"
+        echo "IPv4dns=${IPv4dns}"
+        echo "IPv4addr=${IPv4addr}"
+        echo "IPv4gw=${IPv4gw}"
+        echo "pivpnProto=${pivpnProto}"
+        echo "PORT=${PORT}"
+        echo "ENCRYPT=${ENCRYPT}"
+        echo "APPLY_TWO_POINT_FOUR=${APPLY_TWO_POINT_FOUR}"
+        echo "DOWNLOAD_DH_PARAM=${DOWNLOAD_DH_PARAM}"
+        echo "PUBLICDNS=${PUBLICDNS}"
+        echo "OVPNDNS1=${OVPNDNS1}"
+        echo "OVPNDNS2=${OVPNDNS2}"
+    } | $SUDO tee "${setupVars}" > /dev/null
+}
+
+
+# I suggest replacing some of these names.
+
+#accountForRefactor() {
+#    # At some point in the future this list can be pruned, for now we'll need it to ensure updates don't break.
+#
+#    # Refactoring of install script has changed the name of a couple of variables. Sort them out here.
+#    sed -i 's/pivpnUser/PIVPN_USER/g' ${setupVars}
+#    #sed -i 's/UNATTUPG/UNATTUPG/g' ${setupVars}
+#    sed -i 's/pivpnInterface/PIVPN_INTERFACE/g' ${setupVars}
+#    sed -i 's/IPv4dns/IPV4_DNS/g' ${setupVars}
+#    sed -i 's/IPv4addr/IPV4_ADDRESS/g' ${setupVars}
+#    sed -i 's/IPv4gw/IPV4_GATEWAY/g' ${setupVars}
+#    sed -i 's/pivpnProto/TRANSPORT_LAYER/g' ${setupVars}
+#    #sed -i 's/PORT/PORT/g' ${setupVars}
+#    #sed -i 's/ENCRYPT/ENCRYPT/g' ${setupVars}
+#    #sed -i 's/DOWNLOAD_DH_PARAM/DOWNLOAD_DH_PARAM/g' ${setupVars}
+#    sed -i 's/PUBLICDNS/PUBLIC_DNS/g' ${setupVars}
+#    sed -i 's/OVPNDNS1/OVPN_DNS_1/g' ${setupVars}
+#    sed -i 's/OVPNDNS2/OVPN_DNS_2/g' ${setupVars}
+#}
+
 installPiVPN() {
     stopServices
-    confUnattendedUpgrades
     $SUDO mkdir -p /etc/pivpn/
-    getGitFiles ${pivpnFilesDir} ${pivpnGitUrl}
+    confUnattendedUpgrades
     installScripts
     setCustomProto
     setCustomPort
@@ -1019,17 +1065,39 @@ installPiVPN() {
     confNetwork
     confOVPN
     setClientDNS
+    confLogging
+    finalExports
 }
+
+updatePiVPN() {
+    #accountForRefactor
+    stopServices
+    confUnattendedUpgrades
+    installScripts
+
+    # setCustomProto
+    # write out the PROTO
+    PROTO=$pivpnProto
+    $SUDO cp /tmp/pivpnPROTO /etc/pivpn/INSTALL_PROTO
+
+    #setCustomPort
+    # write out the port
+    $SUDO cp /tmp/INSTALL_PORT /etc/pivpn/INSTALL_PORT
+
+    confOpenVPN
+    confNetwork
+    confOVPN
+
+    # ?? Is this always OK? Also if you only select one DNS server ??
+    $SUDO sed -i '0,/\(dhcp-option DNS \)/ s/\(dhcp-option DNS \).*/\1'${OVPNDNS1}'\"/' /etc/openvpn/server.conf
+    $SUDO sed -i '0,/\(dhcp-option DNS \)/! s/\(dhcp-option DNS \).*/\1'${OVPNDNS2}'\"/' /etc/openvpn/server.conf
+
+    finalExports #re-export setupVars.conf to account for any new vars added in new versions
+}
+
 
 displayFinalMessage() {
     # Final completion message to user
-    if [[ $PLAT == "Ubuntu" || $PLAT == "Debian" ]]; then
-        $SUDO service openvpn start
-    else
-        $SUDO systemctl enable openvpn.service
-        $SUDO systemctl start openvpn.service
-    fi
-
     whiptail --msgbox --backtitle "Make it so." --title "Installation Complete!" "Now run 'pivpn add' to create the ovpn profiles.
 Run 'pivpn help' to see what else you can do!
 The install log is in /etc/pivpn." ${r} ${c}
@@ -1041,46 +1109,210 @@ The install log is in /etc/pivpn." ${r} ${c}
     fi
 }
 
+update_dialogs() {
+    # reconfigure
+    if [ "${reconfigure}" = true ]; then
+        opt1a="Repair"
+        opt1b="This will retain existing settings"
+        strAdd="You will remain on the same version"
+    else
+        opt1a="Update"
+        opt1b="This will retain existing settings."
+        strAdd="You will be updated to the latest version."
+    fi
+    opt2a="Reconfigure"
+    opt2b="This will allow you to enter new settings"
+
+    UpdateCmd=$(whiptail --title "Existing Install Detected!" --menu "\n\nWe have detected an existing install.\n\nPlease choose from the following options: \n($strAdd)" ${r} ${c} 2 \
+    "${opt1a}"  "${opt1b}" \
+    "${opt2a}"  "${opt2b}" 3>&2 2>&1 1>&3) || \
+    { echo "::: Cancel selected. Exiting"; exit 1; }
+
+    case ${UpdateCmd} in
+        ${opt1a})
+            echo "::: ${opt1a} option selected."
+            useUpdateVars=true
+            ;;
+        ${opt2a})
+            echo "::: ${opt2a} option selected"
+            useUpdateVars=false
+            ;;
+    esac
+}
+
+clone_or_update_repos() {
+    if [[ "${reconfigure}" == true ]]; then
+        echo "::: --reconfigure passed to install script. Not downloading/updating local repos"
+    else
+        # Get Git files
+        getGitFiles ${pivpnFilesDir} ${pivpnGitUrl} || \
+        { echo "!!! Unable to clone ${pivpnGitUrl} into ${pivpnFilesDir}, unable to continue."; \
+            exit 1; \
+        }
+    fi
+}
+
 ######## SCRIPT ############
-# Verify there is enough disk space for the install
-verifyFreeDiskSpace
 
-# Install the packages (we do this first because we need whiptail)
-#checkForDependencies
-update_package_cache
+main() {
 
-notify_package_updates_available
+    ######## FIRST CHECK ########
+    # Must be root to install
+    echo ":::"
+    if [[ $EUID -eq 0 ]];then
+        echo "::: You are root."
+    else
+        echo "::: sudo will be used for the install."
+        # Check if it is actually installed
+        # If it isn't, exit because the install cannot complete
+        if [[ $(dpkg-query -s sudo) ]];then
+            export SUDO="sudo"
+            export SUDOE="sudo -E"
+        else
+            echo "::: Please install sudo or run this as root."
+            exit 1
+        fi
+    fi
 
-install_dependent_packages PIVPN_DEPS[@]
+    # Check for supported distribution
+    distro_check
 
-# Start the installer
-welcomeDialogs
+    # Check arguments for the undocumented flags
+    for var in "$@"; do
+        case "$var" in
+            "--reconfigure"  ) reconfigure=true;;
+            "--i_do_not_follow_recommendations"   ) skipSpaceCheck=false;;
+            "--unattended"     ) runUnattended=true;;
+        esac
+    done
 
-# Find interfaces and let the user choose one
-chooseInterface
+    if [[ -f ${setupVars} ]]; then
+        if [[ "${runUnattended}" == true ]]; then
+            echo "::: --unattended passed to install script, no whiptail dialogs will be displayed"
+            useUpdateVars=true
+        else
+            update_dialogs
+        fi
+    fi
 
-# Only try to set static on Raspbian, otherwise let user do it
-if [[ $PLAT != "Raspbian" ]]; then
-    avoidStaticIPv4Ubuntu
-else
-    getStaticIPv4Settings
-    setStaticIPv4
+    # Start the installer
+    # Verify there is enough disk space for the install
+    if [[ "${skipSpaceCheck}" == true ]]; then
+        echo "::: --i_do_not_follow_recommendations passed to script, skipping free disk space verification!"
+    else
+        verifyFreeDiskSpace
+    fi
+
+    # Install the packages (we do this first because we need whiptail)
+    addSoftwareRepo
+
+    update_package_cache
+
+    # Notify user of package availability
+    notify_package_updates_available
+
+    # Install packages used by this installation script
+    install_dependent_packages PIVPN_DEPS[@]
+
+    if [[ ${useUpdateVars} == false ]]; then
+        # Display welcome dialogs
+        welcomeDialogs
+
+        # Find interfaces and let the user choose one
+        chooseInterface
+
+        # Only try to set static on Raspbian, otherwise let user do it
+        if [[ $PLAT != "Raspbian" ]]; then
+            avoidStaticIPv4Ubuntu
+        else
+            getStaticIPv4Settings
+            setStaticIPv4
+        fi
+
+        # Choose the user for the ovpns
+        chooseUser
+
+        # Ask if unattended-upgrades will be enabled
+        unattendedUpgrades
+
+        # Clone/Update the repos
+        clone_or_update_repos
+
+        # Install and log everything to a file
+        installPiVPN | tee ${tmpLog}
+
+        echo "::: Install Complete..."
+    else
+        # Source ${setupVars} for use in the rest of the functions.
+        source ${setupVars}
+
+        echo "::: Using IP address: $IPv4addr"
+        echo "${IPv4addr%/*}" > /tmp/pivpnIP
+        echo "::: Using interface: $pivpnInterface"
+        echo "${pivpnInterface}" > /tmp/pivpnINT
+        echo "::: Using User: $pivpnUser"
+        echo "${pivpnUser}" > /tmp/pivpnUSR
+        echo "::: Using protocol: $pivpnProto"
+        echo "${pivpnProto}" > /tmp/pivpnPROTO
+        echo "::: Using port: $PORT"
+        echo ${PORT} > /tmp/INSTALL_PORT
+        echo ":::"
+
+        # Only try to set static on Raspbian
+        case ${PLAT} in
+          Rasp*)
+            setStaticIPv4 # This might be a problem if a user tries to modify the ip in the config file and then runs an update because of the way we check for previous configuration in /etc/dhcpcd.conf
+            ;;
+          *)
+            echo "::: IP Information"
+            echo "::: Since we think you are not using Raspbian, we will not configure a static IP for you."
+            echo "::: If you are in Amazon then you can not configure a static IP anyway."
+            echo "::: Just ensure before this installer started you had set an elastic IP on your instance."
+            ;;
+          esac
+
+        # Clone/Update the repos
+        clone_or_update_repos
+
+
+        updatePiVPN | tee ${tmpLog}
+    fi
+
+    #Move the install log into /etc/pivpn for storage
+    $SUDO mv ${tmpLog} ${instalLogLoc}
+
+    echo "::: Restarting services..."
+    # Start services
+    case ${PLAT} in
+        Ubuntu|Debian|*vuan)
+            $SUDO service openvpn start
+            ;;
+        *)
+            $SUDO systemctl enable openvpn.service
+            $SUDO systemctl start openvpn.service
+            ;;
+    esac
+
+    echo "::: done."
+
+    if [[ "${useUpdateVars}" == false ]]; then
+        displayFinalMessage
+    fi
+
+    echo ":::"
+    if [[ "${useUpdateVars}" == false ]]; then
+        echo "::: Installation Complete!"
+        echo "::: Now run 'pivpn add' to create an ovpn profile for each of your devices."
+        echo "::: Run 'pivpn help' to see what else you can do!"
+        echo "::: It is strongly recommended you reboot after installation."
+    else
+        echo "::: Update complete!"
+    fi
+
+    echo ":::"
+    echo "::: The install log is located at: ${instalLogLoc}"
+}
+
+if [[ "${PIVPN_TEST}" != true ]] ; then
+  main "$@"
 fi
-
-setNetwork
-
-# Choose the user for the ovpns
-chooseUser
-
-# Ask if unattended-upgrades will be enabled
-unattendedUpgrades
-
-# Install
-installPiVPN | tee ${tmpLog}
-
-#Move the install log into /etc/pivpn for storage
-$SUDO mv ${tmpLog} ${instalLogLoc}
-
-displayFinalMessage
-
-echo "::: Install Complete..."
