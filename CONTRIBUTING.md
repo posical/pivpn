@@ -1,4 +1,4 @@
-##How to contribute to PiVPN
+## How to contribute to PiVPN
 
 ### **Before Getting Started**
 
@@ -6,7 +6,7 @@
 
 This project adheres to the Contributor Covenant [code of conduct](CODE_OF_CONDUCT.md).
 By participating, you are expected to uphold this code.
-Please report unacceptable behavior to [0.kaladin@gmail.com](mailto:0.kaladin@gmail.com).
+Please report unacceptable behavior to any project maintainer.
 
 ### Contributing
 
@@ -22,9 +22,9 @@ Please report unacceptable behavior to [0.kaladin@gmail.com](mailto:0.kaladin@gm
 
 * Ensure the PR description clearly describes the problem and solution. Include the relevant issue number if applicable.
 
-### **PiVPN.io Website**
+### **PiVPN Website**
 
-* Yes the site is open source as well!  You can find and contribute to [pivpn.io](https://github.com/pivpn/pivpn.github.io) directly.
+* Yes the site is open source as well! You can find and contribute to [pivpn.io](https://github.com/pivpn/pivpn.io) directly.
 
 </br>
 
