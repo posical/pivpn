@@ -10,10 +10,16 @@
 # curl -L https://install.pivpn.io | bash
 # Make sure you have `curl` installed
 
+# timestamp 2020/5/24 15:53BST
+
 ######## VARIABLES #########
 pivpnGitUrl="https://github.com/pivpn/pivpn.git"
-setupVars="/etc/pivpn/setupVars.conf"
-pivpnFilesDir="/etc/.pivpn"
+#pivpnGitUrl="/home/pi/repos/pivpn"
+setupVarsFile="setupVars.conf"
+setupConfigDir="/etc/pivpn" 
+tempsetupVarsFile="/tmp/setupVars.conf"
+pivpnFilesDir="/usr/local/src/pivpn"
+pivpnScriptDir="/opt/pivpn"
 
 piholeSetupVars="/etc/pihole/setupVars.conf"
 dnsmasqConfig="/etc/dnsmasq.d/02-pivpn.conf"
@@ -42,11 +48,11 @@ BASE_DEPS=(git tar wget curl grep dnsutils whiptail net-tools bsdmainutils)
 INSTALLED_PACKAGES=()
 
 ######## URLs ########
-easyrsaVer="3.0.6"
-easyrsaRel="https://github.com/OpenVPN/easy-rsa/releases/download/v${easyrsaVer}/EasyRSA-unix-v${easyrsaVer}.tgz"
+easyrsaVer="3.0.7"
+easyrsaRel="https://github.com/OpenVPN/easy-rsa/releases/download/v${easyrsaVer}/EasyRSA-${easyrsaVer}.tgz"
 
 # Raspbian's unattended-upgrades package downloads Debian's config, so this is the link for the proper config
-UNATTUPG_RELEASE="1.16"
+UNATTUPG_RELEASE="2.4"
 UNATTUPG_CONFIG="https://github.com/mvo5/unattended-upgrades/archive/${UNATTUPG_RELEASE}.tar.gz"
 
 # Fallback url for the OpenVPN key
@@ -56,6 +62,7 @@ OPENVPN_KEY_URL="https://swupdate.openvpn.net/repos/repo-public.gpg"
 runUnattended=false
 skipSpaceCheck=false
 reconfigure=false
+showUnsupportedNICs=false
 
 ######## SCRIPT ########
 
@@ -95,30 +102,40 @@ main(){
 	fi
 
 	# Check arguments for the undocumented flags
-	for var in "$@"; do
-		case "$var" in
-			"--i_do_not_follow_recommendations"   ) skipSpaceCheck=false;;
-			"--unattended"     ) runUnattended=true;;
-			"--reconfigure"  ) reconfigure=true;;
+	for ((i=1; i <= "$#"; i++)); do
+		j="$((i+1))"
+		case "${!i}" in
+			"--skip-space-check"        ) skipSpaceCheck=true;;
+			"--unattended"              ) runUnattended=true; unattendedConfig="${!j}";;
+			"--reconfigure"             ) reconfigure=true;;
+			"--show-unsupported-nics"   ) showUnsupportedNICs=true;;
 		esac
 	done
 
 	if [[ "${runUnattended}" == true ]]; then
 		echo "::: --unattended passed to install script, no whiptail dialogs will be displayed"
-		if [ -z "$2" ]; then
-			echo "::: No configuration file passed, using default settings..."
+		if [ -z "$unattendedConfig" ]; then
+			echo "::: No configuration file passed"
+			exit 1
 		else
-			if [ -r "$2" ]; then
-		# shellcheck disable=SC1090
-				source "$2"
+			if [ -r "$unattendedConfig" ]; then
+				# shellcheck disable=SC1090
+				source "$unattendedConfig"
 			else
-				echo "::: Can't open $2"
+				echo "::: Can't open $unattendedConfig"
 				exit 1
 			fi
 		fi
 	fi
 
-	if [ -r "$setupVars" ]; then
+        # see which setup already exists
+        if [ -r "${setupConfigDir}/wireguard/${setupVarsFile}" ]; then
+                setupVars="${setupConfigDir}/wireguard/${setupVarsFile}"
+        elif [ -r "${setupConfigDir}/openvpn/${setupVarsFile}" ]; then
+                setupVars="${setupConfigDir}/openvpn/${setupVarsFile}"
+        fi 
+
+	if [ -r "$setupVars" ]; then 
 		if [[ "${reconfigure}" == true ]]; then
 			echo "::: --reconfigure passed to install script, will reinstall PiVPN overwriting existing settings"
 			UpdateCmd="Reconfigure"
@@ -126,18 +143,18 @@ main(){
 			### What should the script do when passing --unattended to an existing installation?
 			UpdateCmd="Reconfigure"
 		else
-			askAboutExistingInstall
+			askAboutExistingInstall ${setupVars}
 		fi
 	fi
 
 	if [ -z "$UpdateCmd" ] || [ "$UpdateCmd" = "Reconfigure" ]; then
 		:
 	elif [ "$UpdateCmd" = "Update" ]; then
-		$SUDO /opt/pivpn/update.sh "$@"
+		$SUDO ${pivpnScriptDir}/update.sh "$@"
 		exit 0
 	elif [ "$UpdateCmd" = "Repair" ]; then
 		# shellcheck disable=SC1090
-		source "$setupVars"
+		source "$setupVars" 
 		runUnattended=true
 	fi
 
@@ -150,7 +167,7 @@ main(){
 	# Start the installer
 	# Verify there is enough disk space for the install
 	if [[ "${skipSpaceCheck}" == true ]]; then
-		echo "::: --i_do_not_follow_recommendations passed to script, skipping free disk space verification!"
+		echo "::: --skip-space-check passed to script, skipping free disk space verification!"
 	else
 		verifyFreeDiskSpace
 	fi
@@ -203,8 +220,10 @@ main(){
 	fi
 
 	# Save installation setting to the final location
-	echo "INSTALLED_PACKAGES=(${INSTALLED_PACKAGES[*]})" >> /tmp/setupVars.conf
-	$SUDO cp /tmp/setupVars.conf "$setupVars"
+	echo "INSTALLED_PACKAGES=(${INSTALLED_PACKAGES[*]})" >> ${tempsetupVarsFile}
+        echo "::: Setupfiles copied to ${setupConfigDir}/${VPN}/${setupVarsFile}"
+        $SUDO mkdir "${setupConfigDir}/${VPN}/"
+	$SUDO cp ${tempsetupVarsFile} "${setupConfigDir}/${VPN}/${setupVarsFile}" 
 
 	installScripts
 
@@ -229,7 +248,7 @@ askAboutExistingInstall(){
 	opt3a="Reconfigure"
 	opt3b="Reinstall PiVPN with new settings"
 
-	UpdateCmd=$(whiptail --title "Existing Install Detected!" --menu "\nWe have detected an existing install.\n\nPlease choose from the following options:" ${r} ${c} 3 \
+	UpdateCmd=$(whiptail --title "Existing Install Detected!" --menu "\nWe have detected an existing install.\n$1\n\nPlease choose from the following options (Reconfigure can be used to add a second VPN type):" ${r} ${c} 3 \
 	"${opt1a}"  "${opt1b}" \
 	"${opt2a}"  "${opt2b}" \
 	"${opt3a}"  "${opt3b}" 3>&2 2>&1 1>&3) || \
@@ -283,12 +302,8 @@ distroCheck(){
 		;;
 	esac
 
-	if [ "$PLAT" = "Raspbian" ]; then
-		BASE_DEPS+=(dhcpcd5)
-	fi
-
-	echo "PLAT=${PLAT}" > /tmp/setupVars.conf
-	echo "OSCN=${OSCN}" >> /tmp/setupVars.conf
+	echo "PLAT=${PLAT}" > ${tempsetupVarsFile}
+	echo "OSCN=${OSCN}" >> ${tempsetupVarsFile}
 }
 
 noOSSupport(){
@@ -439,17 +454,18 @@ notifyPackageUpdatesAvailable(){
 }
 
 preconfigurePackages(){
-	# Add support for https repositories that will be used later on
+	# If apt is older than 1.5 we need to install an additional package to add
+	# support for https repositories that will be used later on
 	if [[ -f /etc/apt/sources.list ]]; then
-		# buster and bionic have apt >= 1.5 which has https support built in
-		if [[ ${OSCN} != "buster" ]] && [[ ${OSCN} != "bionic" ]]; then
+		INSTALLED_APT="$(apt-cache policy apt | grep -m1 'Installed: ' | grep -v '(none)' | awk '{print $2}')"
+		if dpkg --compare-versions "$INSTALLED_APT" lt 1.5; then
 			BASE_DEPS+=("apt-transport-https")
 		fi
 	fi
 
-	if [[ ${OSCN} == "buster" ]]; then
-		$SUDO update-alternatives --set iptables /usr/sbin/iptables-legacy
-		$SUDO update-alternatives --set ip6tables /usr/sbin/ip6tables-legacy
+	# We set static IP only on Raspbian
+	if [ "$PLAT" = "Raspbian" ]; then
+		BASE_DEPS+=(dhcpcd5)
 	fi
 
 	# if ufw is enabled, configure that.
@@ -470,7 +486,7 @@ preconfigurePackages(){
 		echo iptables-persistent iptables-persistent/autosave_v6 boolean false | $SUDO debconf-set-selections
 	fi
 
-	echo "USING_UFW=${USING_UFW}" >> /tmp/setupVars.conf
+	echo "USING_UFW=${USING_UFW}" >> ${tempsetupVarsFile}
 }
 
 installDependentPackages(){
@@ -546,8 +562,14 @@ local chooseInterfaceOptions
 # Loop sentinel variable
 local firstloop=1
 
-# Find network interfaces whose state is UP, so as to skip virtual interfaces and the loopback interface
-availableInterfaces=$(ip -o link | awk '/state UP/ {print $2}' | cut -d':' -f1 | cut -d'@' -f1)
+if [[ "${showUnsupportedNICs}" == true ]]; then
+	# Show every network interface, could be useful for those who install PiVPN inside virtual machines
+	# or on Raspberry Pis with USB adapters (the loopback interfaces is still skipped)
+	availableInterfaces=$(ip -o link | awk '{print $2}' | cut -d':' -f1 | cut -d'@' -f1 | grep -v -w 'lo')
+else
+	# Find network interfaces whose state is UP, so as to skip virtual interfaces and the loopback interface
+	availableInterfaces=$(ip -o link | awk '/state UP/ {print $2}' | cut -d':' -f1 | cut -d'@' -f1)
+fi
 
 if [ -z "$availableInterfaces" ]; then
     echo "::: Could not find any active network interface, exiting"
@@ -581,12 +603,12 @@ if [ "${runUnattended}" = 'true' ]; then
             exit 1
         fi
     fi
-    echo "IPv4dev=${IPv4dev}" >> /tmp/setupVars.conf
+    echo "IPv4dev=${IPv4dev}" >> ${tempsetupVarsFile}
     return
 else
     if [ "$interfaceCount" -eq 1 ]; then
         IPv4dev="${availableInterfaces}"
-        echo "IPv4dev=${IPv4dev}" >> /tmp/setupVars.conf
+        echo "IPv4dev=${IPv4dev}" >> ${tempsetupVarsFile}
         return
     fi
 fi
@@ -596,7 +618,7 @@ if chooseInterfaceOptions=$("${chooseInterfaceCmd[@]}" "${interfacesArray[@]}" 2
     for desiredInterface in ${chooseInterfaceOptions}; do
         IPv4dev=${desiredInterface}
         echo "::: Using interface: $IPv4dev"
-        echo "IPv4dev=${IPv4dev}" >> /tmp/setupVars.conf
+        echo "IPv4dev=${IPv4dev}" >> ${tempsetupVarsFile}
     done
 else
     echo "::: Cancel selected, exiting...."
@@ -711,9 +733,9 @@ getStaticIPv4Settings() {
 			echo "::: Skipping setting static IP address"
 		fi
 
-		echo "dhcpReserv=${dhcpReserv}" >> /tmp/setupVars.conf
-		echo "IPv4addr=${IPv4addr}" >> /tmp/setupVars.conf
-		echo "IPv4gw=${IPv4gw}" >> /tmp/setupVars.conf
+		echo "dhcpReserv=${dhcpReserv}" >> ${tempsetupVarsFile}
+		echo "IPv4addr=${IPv4addr}" >> ${tempsetupVarsFile}
+		echo "IPv4gw=${IPv4gw}" >> ${tempsetupVarsFile}
 		return
 	fi
 
@@ -735,10 +757,10 @@ No: Setup static IP address
 Don't know what DHCP Reservation is? Answer No." ${r} ${c}); then
 		dhcpReserv=1
         # shellcheck disable=SC2129
-		echo "dhcpReserv=${dhcpReserv}" >> /tmp/setupVars.conf
+		echo "dhcpReserv=${dhcpReserv}" >> ${tempsetupVarsFile}
 		# We don't really need to save them as we won't set a static IP but they might be useful for debugging
-		echo "IPv4addr=${CurrentIPv4addr}" >> /tmp/setupVars.conf
-		echo "IPv4gw=${CurrentIPv4gw}" >> /tmp/setupVars.conf
+		echo "IPv4addr=${CurrentIPv4addr}" >> ${tempsetupVarsFile}
+		echo "IPv4gw=${CurrentIPv4gw}" >> ${tempsetupVarsFile}
 	else
 		# Ask if the user wants to use DHCP settings as their static IP
 		if (whiptail --backtitle "Calibrating network interface" --title "Static IP Address" --yesno "Do you want to use your current network settings as a static address?
@@ -747,8 +769,8 @@ Don't know what DHCP Reservation is? Answer No." ${r} ${c}); then
 				Gateway:       ${CurrentIPv4gw}" ${r} ${c}); then
 			IPv4addr=${CurrentIPv4addr}
 			IPv4gw=${CurrentIPv4gw}
-			echo "IPv4addr=${IPv4addr}" >> /tmp/setupVars.conf
-			echo "IPv4gw=${IPv4gw}" >> /tmp/setupVars.conf
+			echo "IPv4addr=${IPv4addr}" >> ${tempsetupVarsFile}
+			echo "IPv4gw=${IPv4gw}" >> ${tempsetupVarsFile}
 
 			# If they choose yes, let the user know that the IP address will not be available via DHCP and may cause a conflict.
 			whiptail --msgbox --backtitle "IP information" --title "FYI: IP Conflict" "It is possible your router could still try to assign this IP to a device, which would cause a conflict.  But in most cases the router is smart enough to not do that.
@@ -803,8 +825,8 @@ It is also possible to use a DHCP reservation, but if you are going to do that, 
 						IP address:    ${IPv4addr}
 						Gateway:       ${IPv4gw}" ${r} ${c}); then
 					# If the settings are correct, then we need to set the pivpnIP
-					echo "IPv4addr=${IPv4addr}" >> /tmp/setupVars.conf
-					echo "IPv4gw=${IPv4gw}" >> /tmp/setupVars.conf
+					echo "IPv4addr=${IPv4addr}" >> ${tempsetupVarsFile}
+					echo "IPv4gw=${IPv4gw}" >> ${tempsetupVarsFile}
 					# After that's done, the loop ends and we move on
 					ipSettingsCorrect=True
 				else
@@ -867,8 +889,8 @@ chooseUser(){
 		fi
 		install_home=$(grep -m1 "^${install_user}:" /etc/passwd | cut -d: -f6)
 		install_home=${install_home%/}
-		echo "install_user=${install_user}" >> /tmp/setupVars.conf
-		echo "install_home=${install_home}" >> /tmp/setupVars.conf
+		echo "install_user=${install_user}" >> ${tempsetupVarsFile}
+		echo "install_home=${install_home}" >> ${tempsetupVarsFile}
 		return
 	fi
 
@@ -915,8 +937,8 @@ chooseUser(){
 			echo "::: Using User: $install_user"
 			install_home=$(grep -m1 "^${install_user}:" /etc/passwd | cut -d: -f6)
 			install_home=${install_home%/} # remove possible trailing slash
-			echo "install_user=${install_user}" >> /tmp/setupVars.conf
-			echo "install_home=${install_home}" >> /tmp/setupVars.conf
+			echo "install_user=${install_user}" >> ${tempsetupVarsFile}
+			echo "install_home=${install_home}" >> ${tempsetupVarsFile}
 		done
 	else
 		echo "::: Cancel selected, exiting...."
@@ -940,11 +962,11 @@ updateRepo(){
 		### FIXME: Never call rm -rf with a plain variable. Never again as SU!
 		#$SUDO rm -rf "${1}"
 		if test -n "$1"; then
-			$SUDO rm -rf "$(dirname "$1")/.pivpn"
+			$SUDO rm -rf "$(dirname "$1")/pivpn"
 		fi
-		# Go back to /etc otherwise git will complain when the current working
-		# directory has just been deleted (/etc/.pivpn).
-		cd /etc && \
+		# Go back to /usr/local/src otherwise git will complain when the current working
+		# directory has just been deleted (/usr/local/src/pivpn).
+		cd /usr/local/src && \
 		$SUDO git clone -q --depth 1 --no-single-branch "${2}" "${1}" > /dev/null & spinner $!
 		cd "${1}" || exit 1
 		if [ -z "${TESTING+x}" ]; then
@@ -962,11 +984,11 @@ makeRepo(){
 	### FIXME: Never call rm -rf with a plain variable. Never again as SU!
 	#$SUDO rm -rf "${1}"
 	if test -n "$1"; then
-		$SUDO rm -rf "$(dirname "$1")/.pivpn"
+		$SUDO rm -rf "$(dirname "$1")/pivpn"
 	fi
-	# Go back to /etc otherwhise git will complain when the current working
-	# directory has just been deleted (/etc/.pivpn).
-	cd /etc && \
+	# Go back to /usr/local/src otherwhise git will complain when the current working
+	# directory has just been deleted (/usr/local/src/pivpn).
+	cd /usr/local/src && \
 	$SUDO git clone -q --depth 1 --no-single-branch "${2}" "${1}" > /dev/null & spinner $!
 	cd "${1}" || exit 1
 	if [ -z "${TESTING+x}" ]; then
@@ -989,6 +1011,9 @@ getGitFiles(){
 }
 
 cloneOrUpdateRepos(){
+	# /usr/local should always exist, not sure about the src subfolder though
+	$SUDO mkdir -p /usr/local/src
+
 	# Get Git files
 	getGitFiles ${pivpnFilesDir} ${pivpnGitUrl} || \
 	{ echo "!!! Unable to clone ${pivpnGitUrl} into ${pivpnFilesDir}, unable to continue."; \
@@ -1006,6 +1031,7 @@ installPiVPN(){
 		pivpnNET="10.8.0.0"
 		vpnGw="${pivpnNET/.0.0/.0.1}"
 
+		askAboutCustomizing
 		installOpenVPN
 		askCustomProto
 		askCustomPort
@@ -1026,6 +1052,7 @@ installPiVPN(){
 		pivpnDEV="wg0"
 		pivpnNET="10.6.0.0"
 		vpnGw="${pivpnNET/.0.0/.0.1}"
+		CUSTOMIZE=0
 
 		installWireGuard
 		askCustomPort
@@ -1034,13 +1061,13 @@ installPiVPN(){
 		confWireGuard
 		confNetwork
 
-		echo "pivpnPROTO=${pivpnPROTO}" >> /tmp/setupVars.conf
+		echo "pivpnPROTO=${pivpnPROTO}" >> ${tempsetupVarsFile}
 
 	fi
 
-	echo "pivpnDEV=${pivpnDEV}" >> /tmp/setupVars.conf
-	echo "pivpnNET=${pivpnNET}" >> /tmp/setupVars.conf
-	echo "subnetClass=${subnetClass}" >> /tmp/setupVars.conf
+	echo "pivpnDEV=${pivpnDEV}" >> ${tempsetupVarsFile}
+	echo "pivpnNET=${pivpnNET}" >> ${tempsetupVarsFile}
+	echo "subnetClass=${subnetClass}" >> ${tempsetupVarsFile}
 }
 
 askWhichVPN(){
@@ -1076,7 +1103,7 @@ askWhichVPN(){
 		fi
 	else
 		if [ "$PLAT" = "Raspbian" ] || [ "$X86_SYSTEM" -eq 1 ]; then
-			chooseVPNCmd=(whiptail --backtitle "Setup PiVPN" --title "Installation mode" --separate-output --radiolist "WireGuard is a new kind of VPN that provides near-istantaneous connection speed, high performance, modern cryptography.\\n\\nIt's the recommended choice especially if you use mobile devices where WireGuard is easier on battery than OpenVPN.\\n\\nOpenVPN is still available if you need the traditional, flexible, trusted VPN protocol. Or if you need features like TCP and custom search domain.\\n\\nChoose a VPN (press space to select):" "${r}" "${c}" 2)
+			chooseVPNCmd=(whiptail --backtitle "Setup PiVPN" --title "Installation mode" --separate-output --radiolist "WireGuard is a new kind of VPN that provides near-instantaneous connection speed, high performance, and modern cryptography.\\n\\nIt's the recommended choice especially if you use mobile devices where WireGuard is easier on battery than OpenVPN.\\n\\nOpenVPN is still available if you need the traditional, flexible, trusted VPN protocol or if you need features like TCP and custom search domain.\\n\\nChoose a VPN (press space to select):" "${r}" "${c}" 2)
 			VPNChooseOptions=(WireGuard "" on
 								OpenVPN "" off)
 
@@ -1093,7 +1120,17 @@ askWhichVPN(){
 		fi
 	fi
 
-	echo "VPN=${VPN}" >> /tmp/setupVars.conf
+	echo "VPN=${VPN}" >> ${tempsetupVarsFile}
+}
+
+askAboutCustomizing(){
+	if [ "${runUnattended}" = 'false' ]; then
+		if (whiptail --backtitle "Setup PiVPN" --title "Installation mode" --yesno --defaultno "PiVPN uses the following settings that we believe are good defaults for most users. However, we still want to keep flexibility, so if you need to customize them, choose Yes.\n\n* UDP or TCP protocol: UDP\n* Custom search domain for the DNS field: None\n* Modern features or best compatibility: Modern features (256 bit certificate + additional TLS encryption)" ${r} ${c}); then
+			CUSTOMIZE=1
+		else
+			CUSTOMIZE=0
+		fi
+	fi
 }
 
 downloadVerifyKey(){
@@ -1295,8 +1332,16 @@ askCustomProto(){
 				exit 1
 			fi
 		fi
-		echo "pivpnPROTO=${pivpnPROTO}" >> /tmp/setupVars.conf
+		echo "pivpnPROTO=${pivpnPROTO}" >> ${tempsetupVarsFile}
 		return
+	fi
+
+	if [ "$CUSTOMIZE" -eq 0 ]; then
+		if [ "$VPN" = "openvpn" ]; then
+			pivpnPROTO="udp"
+			echo "pivpnPROTO=${pivpnPROTO}" >> ${tempsetupVarsFile}
+			return
+		fi
 	fi
 
 	# Set the available protocols into an array so it can be used with a whiptail dialog
@@ -1308,7 +1353,7 @@ askCustomProto(){
 		# Convert option into lowercase (UDP->udp)
 		pivpnPROTO="${pivpnPROTO,,}"
 		echo "::: Using protocol: $pivpnPROTO"
-		echo "pivpnPROTO=${pivpnPROTO}" >> /tmp/setupVars.conf
+		echo "pivpnPROTO=${pivpnPROTO}" >> ${tempsetupVarsFile}
 	else
 		echo "::: Cancel selected, exiting...."
 		exit 1
@@ -1338,7 +1383,7 @@ askCustomPort(){
 				exit 1
 			fi
 		fi
-		echo "pivpnPORT=${pivpnPORT}" >> /tmp/setupVars.conf
+		echo "pivpnPORT=${pivpnPORT}" >> ${tempsetupVarsFile}
 		return
 	fi
 
@@ -1381,7 +1426,7 @@ askCustomPort(){
 			fi
 		done
 	# write out the port
-	echo "pivpnPORT=${pivpnPORT}" >> /tmp/setupVars.conf
+	echo "pivpnPORT=${pivpnPORT}" >> ${tempsetupVarsFile}
 }
 
 askClientDNS(){
@@ -1414,8 +1459,8 @@ askClientDNS(){
 			exit 1
 		fi
 
-		echo "pivpnDNS1=${pivpnDNS1}" >> /tmp/setupVars.conf
-		echo "pivpnDNS2=${pivpnDNS2}" >> /tmp/setupVars.conf
+		echo "pivpnDNS1=${pivpnDNS1}" >> ${tempsetupVarsFile}
+		echo "pivpnDNS2=${pivpnDNS2}" >> ${tempsetupVarsFile}
 		return
 	fi
 
@@ -1450,17 +1495,13 @@ askClientDNS(){
 			# Use the Raspberry Pi VPN IP as DNS server.
 			pivpnDNS1="$vpnGw"
 
-			echo "pivpnDNS1=${pivpnDNS1}" >> /tmp/setupVars.conf
-			echo "pivpnDNS2=${pivpnDNS2}" >> /tmp/setupVars.conf
+			echo "pivpnDNS1=${pivpnDNS1}" >> ${tempsetupVarsFile}
+			echo "pivpnDNS2=${pivpnDNS2}" >> ${tempsetupVarsFile}
 			return
 		fi
 	fi
 
-	DNSChoseCmd=(whiptail --separate-output --radiolist "Select the DNS Provider
-  for your VPN Clients (press space to select). To use your own, select
-	Custom.\\n\\nIn case you have a local resolver running, i.e. unbound, select
-	\"PiVPN-is-local-DNS\" and make sure your resolver is listening on
-	\"$vpnGw\", allowing requests from \"${pivpnNET}/${subnetClass}\"." "${r}" "${c}" 6)
+	DNSChoseCmd=(whiptail --backtitle "Setup PiVPN" --title "DNS Provider" --separate-output --radiolist "Select the DNS Provider for your VPN Clients (press space to select).\nTo use your own, select Custom.\n\nIn case you have a local resolver running, i.e. unbound, select \"PiVPN-is-local-DNS\" and make sure your resolver is listening on \"$vpnGw\", allowing requests from \"${pivpnNET}/${subnetClass}\"." "${r}" "${c}" 6)
 	DNSChooseOptions=(Quad9 "" on
 			OpenDNS "" off
 			Level3 "" off
@@ -1536,19 +1577,14 @@ askClientDNS(){
 		exit 1
 	fi
 
-	echo "pivpnDNS1=${pivpnDNS1}" >> /tmp/setupVars.conf
-	echo "pivpnDNS2=${pivpnDNS2}" >> /tmp/setupVars.conf
+	echo "pivpnDNS1=${pivpnDNS1}" >> ${tempsetupVarsFile}
+	echo "pivpnDNS2=${pivpnDNS2}" >> ${tempsetupVarsFile}
 }
 
 #Call this function to use a regex to check user input for a valid custom domain
 validDomain(){
-  local domain=$1
-  local stat=1
-
-  if [[ $domain =~ ^(([a-zA-Z0-9]{1,63}|([a-zA-Z0-9]{1,60}[-a-zA-Z0-9()]{0,2}[a-zA-Z0-9]{1,60}))\.){1,6}([a-zA-Z]{2,})$ ]]; then
-	stat=$?
-  fi
-  return $stat
+    local domain="$1"
+	grep -qP '(?=^.{4,253}$)(^(?:[a-zA-Z0-9](?:(?:[a-zA-Z0-9\-]){0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$)' <<< "$domain"
 }
 
 #This procedure allows a user to specify a custom search domain if they have one.
@@ -1564,8 +1600,15 @@ askCustomDomain(){
 		else
 			echo "::: Skipping custom domain"
 		fi
-		echo "pivpnSEARCHDOMAIN=${pivpnSEARCHDOMAIN}" >> /tmp/setupVars.conf
+		echo "pivpnSEARCHDOMAIN=${pivpnSEARCHDOMAIN}" >> ${tempsetupVarsFile}
 		return
+	fi
+
+	if [ "$CUSTOMIZE" -eq 0 ]; then
+		if [ "$VPN" = "openvpn" ]; then
+			echo "pivpnSEARCHDOMAIN=${pivpnSEARCHDOMAIN}" >> ${tempsetupVarsFile}
+			return
+		fi
 	fi
 
 	DomainSettingsCorrect=False
@@ -1593,7 +1636,7 @@ askCustomDomain(){
 		done
 	fi
 
-	echo "pivpnSEARCHDOMAIN=${pivpnSEARCHDOMAIN}" >> /tmp/setupVars.conf
+	echo "pivpnSEARCHDOMAIN=${pivpnSEARCHDOMAIN}" >> ${tempsetupVarsFile}
 }
 
 askPublicIPOrDNS(){
@@ -1619,7 +1662,7 @@ askPublicIPOrDNS(){
 				exit 1
 			fi
 		fi
-		echo "pivpnHOST=${pivpnHOST}" >> /tmp/setupVars.conf
+		echo "pivpnHOST=${pivpnHOST}" >> ${tempsetupVarsFile}
 		return
 	fi
 
@@ -1663,7 +1706,7 @@ askPublicIPOrDNS(){
 		exit 1
 	fi
 
-	echo "pivpnHOST=${pivpnHOST}" >> /tmp/setupVars.conf
+	echo "pivpnHOST=${pivpnHOST}" >> ${tempsetupVarsFile}
 }
 
 askEncryption(){
@@ -1712,10 +1755,21 @@ askEncryption(){
 			fi
 		fi
 
-		echo "TWO_POINT_FOUR=${TWO_POINT_FOUR}" >> /tmp/setupVars.conf
-		echo "pivpnENCRYPT=${pivpnENCRYPT}" >> /tmp/setupVars.conf
-		echo "USE_PREDEFINED_DH_PARAM=${USE_PREDEFINED_DH_PARAM}" >> /tmp/setupVars.conf
+		echo "TWO_POINT_FOUR=${TWO_POINT_FOUR}" >> ${tempsetupVarsFile}
+		echo "pivpnENCRYPT=${pivpnENCRYPT}" >> ${tempsetupVarsFile}
+		echo "USE_PREDEFINED_DH_PARAM=${USE_PREDEFINED_DH_PARAM}" >> ${tempsetupVarsFile}
 		return
+	fi
+
+	if [ "$CUSTOMIZE" -eq 0 ]; then
+		if [ "$VPN" = "openvpn" ]; then
+			TWO_POINT_FOUR=1
+			pivpnENCRYPT=256
+			echo "TWO_POINT_FOUR=${TWO_POINT_FOUR}" >> ${tempsetupVarsFile}
+			echo "pivpnENCRYPT=${pivpnENCRYPT}" >> ${tempsetupVarsFile}
+			echo "USE_PREDEFINED_DH_PARAM=${USE_PREDEFINED_DH_PARAM}" >> ${tempsetupVarsFile}
+			return
+		fi
 	fi
 
 	if (whiptail --backtitle "Setup OpenVPN" --title "Installation mode" --yesno "OpenVPN 2.4 can take advantage of Elliptic Curves to provide higher connection speed and improved security over RSA, while keeping smaller certificates.\\n\\nMoreover, the 'tls-crypt' directive encrypts the certificates being used while authenticating, increasing privacy.\\n\\nIf your clients do run OpenVPN 2.4 or later you can enable these features, otherwise choose 'No' for best compatibility." "${r}" "${c}"); then
@@ -1746,9 +1800,9 @@ askEncryption(){
 		USE_PREDEFINED_DH_PARAM=0
 	fi
 
-	echo "TWO_POINT_FOUR=${TWO_POINT_FOUR}" >> /tmp/setupVars.conf
-	echo "pivpnENCRYPT=${pivpnENCRYPT}" >> /tmp/setupVars.conf
-	echo "USE_PREDEFINED_DH_PARAM=${USE_PREDEFINED_DH_PARAM}" >> /tmp/setupVars.conf
+	echo "TWO_POINT_FOUR=${TWO_POINT_FOUR}" >> ${tempsetupVarsFile}
+	echo "pivpnENCRYPT=${pivpnENCRYPT}" >> ${tempsetupVarsFile}
+	echo "USE_PREDEFINED_DH_PARAM=${USE_PREDEFINED_DH_PARAM}" >> ${tempsetupVarsFile}
 }
 
 cidrToMask(){
@@ -1791,8 +1845,12 @@ confOpenVPN(){
 	fi
 
 	# Get easy-rsa
-	wget -qO- "${easyrsaRel}" | $SUDO tar xz --directory /etc/openvpn
-	$SUDO mv /etc/openvpn/EasyRSA-v${easyrsaVer} /etc/openvpn/easy-rsa
+	wget -qO- "${easyrsaRel}" | $SUDO tar xz --one-top-level=/etc/openvpn/easy-rsa --strip-components 1
+	if ! test -s /etc/openvpn/easy-rsa/easyrsa; then
+		echo "$0: ERR: Failed to download EasyRSA."
+		exit 1
+	fi
+
 	# fix ownership
 	$SUDO chown -R root:root /etc/openvpn/easy-rsa
 	$SUDO mkdir /etc/openvpn/easy-rsa/pki
@@ -1977,9 +2035,9 @@ confWireGuard(){
 	$SUDO chmod 700 /etc/wireguard
 
 	if [ "${runUnattended}" = 'true' ]; then
-		echo "::: The Server Keys and Pre-Shared key will now be generated."
+		echo "::: The Server Keys will now be generated."
 	else
-		whiptail --title "Server Information" --msgbox "The Server Keys and Pre-Shared key will now be generated." "${r}" "${c}"
+		whiptail --title "Server Information" --msgbox "The Server Keys will now be generated." "${r}" "${c}"
 	fi
 
 	# Remove configs and keys folders to make space for a new server when using 'Repair' or 'Reconfigure'
@@ -1993,10 +2051,9 @@ confWireGuard(){
 
 	# Generate private key and derive public key from it
 	wg genkey | $SUDO tee /etc/wireguard/keys/server_priv &> /dev/null
-	wg genpsk | $SUDO tee /etc/wireguard/keys/psk &> /dev/null
 	$SUDO cat /etc/wireguard/keys/server_priv | wg pubkey | $SUDO tee /etc/wireguard/keys/server_pub &> /dev/null
 
-	echo "::: Server Keys and Pre-Shared Key have been generated."
+	echo "::: Server Keys have been generated."
 
 	echo "[Interface]
 PrivateKey = $($SUDO cat /etc/wireguard/keys/server_priv)
@@ -2092,8 +2149,8 @@ confNetwork(){
 			;;
 		esac
 
-		echo "INPUT_CHAIN_EDITED=${INPUT_CHAIN_EDITED}" >> /tmp/setupVars.conf
-		echo "FORWARD_CHAIN_EDITED=${FORWARD_CHAIN_EDITED}" >> /tmp/setupVars.conf
+		echo "INPUT_CHAIN_EDITED=${INPUT_CHAIN_EDITED}" >> ${tempsetupVarsFile}
+		echo "FORWARD_CHAIN_EDITED=${FORWARD_CHAIN_EDITED}" >> ${tempsetupVarsFile}
 
 	fi
 }
@@ -2156,7 +2213,7 @@ askUnattendedUpgrades(){
 				echo "::: Skipping unattended upgrades"
 			fi
 		fi
-		echo "UNATTUPG=${UNATTUPG}" >> /tmp/setupVars.conf
+		echo "UNATTUPG=${UNATTUPG}" >> ${tempsetupVarsFile}
 		return
 	fi
 
@@ -2168,7 +2225,7 @@ askUnattendedUpgrades(){
 		UNATTUPG=0
 	fi
 
-	echo "UNATTUPG=${UNATTUPG}" >> /tmp/setupVars.conf
+	echo "UNATTUPG=${UNATTUPG}" >> ${tempsetupVarsFile}
 }
 
 confUnattendedUpgrades(){
@@ -2220,28 +2277,44 @@ confUnattendedUpgrades(){
 }
 
 installScripts(){
-	# Install the scripts from /etc/.pivpn to their various locations
-	echo ":::"
-	echo -n -e "::: Installing scripts to /opt/pivpn...\n"
-	if [ ! -d /opt/pivpn ]; then
-		$SUDO mkdir -p /opt/pivpn
-		$SUDO chown root:root /opt/pivpn
-		$SUDO chmod 0755 /opt/pivpn
+	# Ensure /opt exists (issue #607)
+	$SUDO mkdir -p /opt
+
+	if [[ ${VPN} == 'wireguard' ]]; then
+		othervpn='openvpn'
+	else
+		othervpn='wireguard'
 	fi
 
-	$SUDO install -m 755 "$pivpnFilesDir"/scripts/*.sh -t /opt/pivpn
-	$SUDO install -m 755 "$pivpnFilesDir"/scripts/"$VPN"/*.sh -t /opt/pivpn
-	$SUDO install -m 755 "$pivpnFilesDir"/scripts/"$VPN"/pivpn /usr/local/bin/pivpn
-	$SUDO install -m 644 "$pivpnFilesDir"/scripts/"$VPN"/bash-completion /etc/bash_completion.d/pivpn
-	# shellcheck disable=SC1091
-	. /etc/bash_completion.d/pivpn
+	# Symlink scripts from /usr/local/src/pivpn to their various locations
+	echo -n -e "::: Installing scripts to ${pivpnScriptDir}...\n"
+
+	# if the other protocol file exists it has been installed
+	if [ -r "${setupConfigDir}/${othervpn}/${setupVarsFile}" ]; then
+		# Both are installed, no bash completion, unlink if already there
+		$SUDO unlink /etc/bash_completion.d/pivpn
+
+		# Unlink the protocol specific pivpn script and symlink the common
+		# script to the location instead
+		$SUDO unlink /usr/local/bin/pivpn
+		$SUDO ln -s -T "${pivpnFilesDir}/scripts/pivpn" /usr/local/bin/pivpn
+	else
+		# Only one protocol is installed, symlink bash completion, the pivpn script
+		# and the script directory
+		$SUDO ln -s -T "${pivpnFilesDir}/scripts/${VPN}/bash-completion" /etc/bash_completion.d/pivpn
+		$SUDO ln -s -T "${pivpnFilesDir}/scripts/${VPN}/pivpn.sh" /usr/local/bin/pivpn
+		$SUDO ln -s "${pivpnFilesDir}/scripts/" "${pivpnScriptDir}"
+		# shellcheck disable=SC1091
+		. /etc/bash_completion.d/pivpn
+	fi
+
 	echo " done."
 }
 
 displayFinalMessage(){
 	if [ "${runUnattended}" = 'true' ]; then
 		echo "::: Installation Complete!"
-		echo "::: Now run 'pivpn add' to create the ovpn profiles."
+		echo "::: Now run 'pivpn add' to create the client profiles."
 		echo "::: Run 'pivpn help' to see what else you can do!"
 		echo
 		echo "::: If you run into any issue, please read all our documentation carefully."
@@ -2253,7 +2326,7 @@ displayFinalMessage(){
 	fi
 
 	# Final completion message to user
-	whiptail --msgbox --backtitle "Make it so." --title "Installation Complete!" "Now run 'pivpn add' to create the ovpn profiles.
+	whiptail --msgbox --backtitle "Make it so." --title "Installation Complete!" "Now run 'pivpn add' to create the client profiles.
 Run 'pivpn help' to see what else you can do!\\n\\nIf you run into any issue, please read all our documentation carefully.
 All incomplete posts or bug reports will be ignored or deleted.\\n\\nThank you for using PiVPN." ${r} ${c}
 	if (whiptail --title "Reboot" --yesno --defaultno "It is strongly recommended you reboot after installation.  Would you like to reboot now?" ${r} ${c}); then

@@ -14,7 +14,7 @@ into a VPN server using two free, open-source protocols:
 Have you been looking for a good guide or tutorial for setting up a VPN server on a Raspberry Pi or Ubuntu based server?  
 Run this script and you don't need a guide or tutorial, this will do it all for you, in a fraction of the time and with hardened security settings in place by default.  
 
-The master branch of this script installs and configures either WireGuard or OpenVPN on Raspbian, Debian or Ubuntu and it as been tested to run not only on Raspberry Pi but also in any Cloud Provider VPS.  
+The master branch of this script installs and configures either WireGuard or OpenVPN (or both) on Raspbian, Debian or Ubuntu and it as been tested to run not only on Raspberry Pi but also in any Cloud Provider VPS.  
 We recommend using the latest Raspbian Lite image on a Raspberry Pi in your home so you can VPN into your home from a unsecure remote locations and safely use the internet.  
 However, the scripts do try to detect different distributions and make adjustments accordingly.  
 They should work on the majority of Ubuntu and Debian based distributions including those using UFW by default instead of raw iptables.  
