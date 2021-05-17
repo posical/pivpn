@@ -1,9 +1,54 @@
 # Information of Latest updates
 
-This file has the objective of describing the major changes for each merge from test to master in a similar way as a
-patch release notes.
+This file has the objective of describing the major changes for each merge from test to master in a similar way as a patch release notes.
 
 Everytime Test branch is merged into master, a new entry should be created with the date and changes being merged.
+
+## May 7th 2021
+
+General code quality fixes
+ - #1253, #1254, #1256, #1272
+Disabled progress bar when running unattended
+ - #1276
+Added wireguard MTU support when setting up unattended
+ - #1278
+Support for multiple setupVars while via unattended setup
+- #1279
+Fix for currupted QR code display in multiple fonts
+ - #1305
+
+## Jan 26th 2021
+
+Fixed: 
+  - #1231 Return proper exit codes
+Improvements
+  - First implementation of Automated testing with travisCI
+
+
+## Jan 17th 2021
+
+- Issues Fixed:
+  - #1180 Incorrect system detection
+  - #1212 Confusing prompt when removing wireguard config
+  - #1204 Package cache update not workig
+- New Features
+  - #1111 Possibility to turn on/off single wireguard client configs
+  - #1177 Possibility to change AllowedIPs 
+- English corrections
+
+## Nov 4th 2020
+
+- Official support for Ubuntu Server 20.04 on Raspberry Pi (32-bit and 64-bit).
+- Handle special characters better when managing OpenVPN clients.
+- Show expired OpenVPN certificates as such when using 'pivpn -l'.
+- Improved OpenVPN and WireGuard availability detection.
+- Reload WireGuard instead of restarting so it doesn't kick existing clients.
+
+## Jul 24th 2020
+
+- Added ability to remove client by index. For example, when the user is presented with '2) phone' he can remove the client by typing either '2' or 'phone'.
+- Added ability to remove a client non-interactively with 'pivpn -r phone -y'.
+- When choosing to use Pi-hole, do not whitelist the specific VPN interface. Instead, use Pi-hole's built-in command 'pihole -a -i local' to allow listening from on the VPN interface. DNS resolution on the LAN shouldn't break anymore in some circumstances if the user changes Pi-hole's listening behavior after installing PiVPN.
 
 ## Jun 9th 2020
 

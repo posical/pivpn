@@ -53,7 +53,7 @@ if [ ! -d "${install_home}/configs" ]; then
     chmod 0750 "${install_home}/configs"
 fi
 
-cd /etc/wireguard
+cd /etc/wireguard || exit
 
 if [ -z "${CLIENT_NAME}" ]; then
     read -r -p "Enter a Name for the Client: " CLIENT_NAME
@@ -61,6 +61,16 @@ fi
 
 if [[ "${CLIENT_NAME}" =~ [^a-zA-Z0-9.@_-] ]]; then
     echo "Name can only contain alphanumeric characters and these characters (.-@_)."
+    exit 1
+fi
+
+if [[ "${CLIENT_NAME:0:1}" == "-" ]]; then
+    echo "Name cannot start with -"
+    exit 1
+fi
+
+if [[ "${CLIENT_NAME}" =~ ^[0-9]+$ ]]; then
+    echo "Names cannot be integers."
     exit 1
 fi
 
@@ -89,11 +99,15 @@ done
 
 NET_REDUCED="${pivpnNET::-2}"
 
-echo -n "[Interface]
+echo "[Interface]
 PrivateKey = $(cat "keys/${CLIENT_NAME}_priv")
-Address = ${NET_REDUCED}.${COUNT}/${subnetClass}
-DNS = ${pivpnDNS1}" > "configs/${CLIENT_NAME}.conf"
+Address = ${NET_REDUCED}.${COUNT}/${subnetClass}" > "configs/${CLIENT_NAME}.conf"
 
+if [ -n "${pivpnMTU}" ]; then
+    echo "MTU = ${pivpnMTU}" >> "configs/${CLIENT_NAME}.conf"
+fi
+
+echo -n "DNS = ${pivpnDNS1}" >> "configs/${CLIENT_NAME}.conf"
 if [ -n "${pivpnDNS2}" ]; then
     echo ", ${pivpnDNS2}" >> "configs/${CLIENT_NAME}.conf"
 else
@@ -105,7 +119,7 @@ echo "[Peer]
 PublicKey = $(cat keys/server_pub)
 PresharedKey = $(cat "keys/${CLIENT_NAME}_psk")
 Endpoint = ${pivpnHOST}:${pivpnPORT}
-AllowedIPs = 0.0.0.0/0, ::0/0" >> "configs/${CLIENT_NAME}.conf"
+AllowedIPs = ${ALLOWED_IPS}" >> "configs/${CLIENT_NAME}.conf"
 echo "::: Client config generated"
 
 echo "### begin ${CLIENT_NAME} ###
@@ -125,10 +139,10 @@ if [ -f /etc/pivpn/hosts.wireguard ]; then
     fi
 fi
 
-if systemctl restart wg-quick@wg0; then
-    echo "::: WireGuard restarted"
+if systemctl reload wg-quick@wg0; then
+    echo "::: WireGuard reloaded"
 else
-    echo "::: Failed to restart WireGuard"
+    echo "::: Failed to reload WireGuard"
 fi
 
 cp "configs/${CLIENT_NAME}.conf" "${install_home}/configs/${CLIENT_NAME}.conf"
